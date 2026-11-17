@@ -4,5 +4,6 @@
  * 구글에 등록한 리다이렉트 주소: https://moontur.github.io/schedule/
  */
 window.APP_CONFIG = {
-  clientId: 'YOUR_CLIENT_ID.apps.googleusercontent.com',
+  // Google Cloud 프로젝트 schedule-pwa-515001 · OAuth 클라이언트 'schedule-pwa web'
+  clientId: '599151196651-crm0cb2ni9qdedjiivkar22ia1e56ir7.apps.googleusercontent.com',
 };
