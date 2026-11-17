@@ -245,19 +245,35 @@ test('할 일 목록: 지난 기한 / 오늘 / 이번 주(토요일까지) / 다
   eq(L.doneTasks(TASKS).map((t) => t.id), ['d']);
 });
 
-test('오늘 화면: 마감일 있는 하위 할 일도 지난 기한에 보임, 다가오는 마감은 2주까지', () => {
-  const g = L.todayTasks(TASKS, TODAY, 14);
-  eq(g.overdue.map((t) => t.id), ['o', 's']);
-  eq(g.today.map((t) => t.id), ['t']);
-  eq(g.upcoming.map((t) => t.id), ['w', 'l']);
+// 마감이 먼 할 일(2주 넘게), 완료한 날짜 없는 할 일, 날짜 없는 하위 할 일, 먼 하위 할 일
+const MORE = TASKS.concat([
+  { id: 'f', title: '먼 마감', due: '2027-01-10', done: false, parent: '' },
+  { id: 'n2', title: '날짜 없음 완료', due: '', done: true, parent: '' },
+  { id: 'n3', title: '날짜 없는 하위', due: '', done: false, parent: 't' },
+  { id: 'sf', title: '먼 하위', due: '2026-12-01', done: false, parent: 'l' },
+]);
+
+test('오늘 화면 할 일: 지난 기한(하위 포함) / 오늘 / 앞으로 할 일 — 마감이 멀어도 모두, 날짜 없는 것은 맨 아래', () => {
+  const s = L.taskSections(MORE, TODAY, TODAY);
+  eq(s.overdue.map((t) => t.id), ['o', 's']);
+  eq(s.due.map((t) => t.id), ['t']);
+  eq(s.ahead.map((t) => t.id), ['w', 'l', 'f', 'n'], '2주 넘은 할 일도, 날짜 없는 할 일은 맨 아래, 하위·완료는 뺌');
 });
 
-test('오늘 화면: 날짜 없음 묶음은 미완료 상위 할 일만', () => {
-  const g = L.todayTasks(TASKS.concat([
-    { id: 'n2', title: '날짜 없음 완료', due: '', done: true, parent: '' },
-    { id: 'n3', title: '날짜 없는 하위', due: '', done: false, parent: 't' },
-  ]), TODAY, 14);
-  eq(g.nodate.map((t) => t.id), ['n']);
+test('캘린더 그날 칸 할 일: 그날 마감(완료 포함) 먼저, 나머지 전체는 오늘 기준으로', () => {
+  // 앞으로의 날을 고르면: 그날 마감 → 지난 기한(오늘 기준) → 나머지(오늘 마감 포함)
+  let s = L.taskSections(MORE, '2026-11-21', TODAY, { includeDone: true });
+  eq(s.due.map((t) => t.id), ['w']);
+  eq(s.overdue.map((t) => t.id), ['o', 's']);
+  eq(s.ahead.map((t) => t.id), ['t', 'l', 'f', 'n']);
+  // 지난 날을 고르면: 그날 완료한 것도 보이고, 같은 할 일이 두 번 나오지 않음
+  s = L.taskSections(MORE, '2026-11-16', TODAY, { includeDone: true });
+  eq(s.due.map((t) => t.id), ['o', 's']);
+  eq(s.overdue.map((t) => t.id), [], '그날 묶음에 이미 나옴');
+  s = L.taskSections(MORE, '2026-11-10', TODAY, { includeDone: true });
+  eq(s.due.map((t) => t.id), ['d']);
+  const ids = [].concat(s.due, s.overdue, s.ahead).map((t) => t.id);
+  assert.equal(new Set(ids).size, ids.length, '겹치지 않음');
 });
 
 test('하위 할 일은 순서(position)대로', () => {

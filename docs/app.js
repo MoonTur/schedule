@@ -304,9 +304,9 @@
   function renderToday() {
     const day = state.today;
     const evs = L.eventsOn(allEvents(), day);
-    const g = L.todayTasks(state.tasks, day, 14);
-    const ahead = g.upcoming.concat(g.nodate); // 날짜 없는 할 일은 날짜 있는 할 일 아래에 이어서
-    const hasTasks = g.overdue.length + g.today.length + ahead.length > 0;
+    // 할 일 전체: 지난 기한 / 오늘 / 앞으로 할 일(마감이 멀어도 모두, 날짜 없는 것은 맨 아래)
+    const s = L.taskSections(state.tasks, day, state.today);
+    const hasTasks = s.overdue.length + s.due.length + s.ahead.length > 0;
     return `<div class="today">
       <p class="today-date">${esc(L.fmtLong(day))}</p>
       <div class="today-cols">
@@ -316,9 +316,9 @@
         </section>
         <section aria-label="할 일">
           <div class="block-head"><h2>할 일</h2><span class="src src-task">Google Tasks · ${esc(listTitle())}</span></div>
-          ${taskGroup('지난 기한', g.overdue, 'danger')}
-          ${taskGroup('오늘', g.today)}
-          ${taskGroup('앞으로 할 일', ahead)}
+          ${taskGroup('지난 기한', s.overdue, 'danger')}
+          ${taskGroup('오늘', s.due)}
+          ${taskGroup('앞으로 할 일', s.ahead)}
           ${hasTasks ? '' : '<p class="empty">할 일이 없습니다.</p>'}
           <form class="quick-add" data-form="quick-add">${ICON.plus}<input name="title" data-draft="quick" value="${esc(draftValue('quick'))}" placeholder="오늘 할 일 추가" aria-label="오늘 마감인 할 일 추가" autocomplete="off" enterkeyhint="done"></form>
         </section>
@@ -506,8 +506,9 @@
 
   function renderDayPanel(day, evs, layout, wide) {
     const dayEvs = L.eventsOn(evs, day);
-    const dayTasks = L.tasksDueOn(state.tasks, day);
-    const overdue = day === state.today ? L.todayTasks(state.tasks, day).overdue : [];
+    // 할 일 전체: 이 날 마감(완료한 것 포함) / 지난 기한 / 앞으로 할 일(날짜 없는 것은 맨 아래)
+    const s = L.taskSections(state.tasks, day, state.today, { includeDone: true });
+    const dueLabel = day === state.today ? '오늘 마감' : L.fmtMD(day, yearOf(state.today)) + ' 마감';
     const badge = day === state.today ? '<span class="badge">오늘</span>' : '';
     let head;
     if (layout === 'day') {
@@ -526,20 +527,23 @@
     } else {
       head = `<div class="dp-head"><div class="dp-nav"><h2>${esc(L.fmtLong(day))}</h2>${badge}</div>${wide ? layoutBtn('day', '크게 보기') : ''}</div>`;
     }
+    // 할 일 목록이 길어질 수 있으므로 추가 버튼은 날짜 바로 아래에
     return `${head}
+      <div class="dp-actions">
+        <button type="button" class="add-ev" data-act="new-event" data-date="${day}">+ 일정<small>구글 캘린더에 저장</small></button>
+        <button type="button" class="add-task" data-act="new-task" data-date="${day}">+ 할 일<small>Google Tasks에 저장</small></button>
+      </div>
       <section>
         <div class="block-head"><h3>일정</h3><span class="src src-ev">구글 캘린더</span></div>
         ${dayEvs.length ? dayEvs.map((ev) => eventRow(ev, day)).join('') : '<p class="empty">일정이 없습니다.</p>'}
       </section>
       <section>
         <div class="block-head"><h3>할 일</h3><span class="src src-task">Google Tasks</span></div>
-        ${dayTasks.length ? dayTasks.map(taskRow).join('') : '<p class="empty">이 날 마감인 할 일이 없습니다.</p>'}
-        ${taskGroup('지난 기한', overdue, 'danger')}
-      </section>
-      <div class="dp-actions">
-        <button type="button" class="add-ev" data-act="new-event" data-date="${day}">+ 일정<small>구글 캘린더에 저장</small></button>
-        <button type="button" class="add-task" data-act="new-task" data-date="${day}">+ 할 일<small>Google Tasks에 저장</small></button>
-      </div>`;
+        <h3 class="g-label">${esc(dueLabel)}</h3>
+        ${s.due.length ? s.due.map(taskRow).join('') : '<p class="empty">이 날 마감인 할 일이 없습니다.</p>'}
+        ${taskGroup('지난 기한', s.overdue, 'danger')}
+        ${taskGroup('앞으로 할 일', s.ahead)}
+      </section>`;
   }
 
   /* ================= 입력 창 ================= */

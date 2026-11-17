@@ -225,19 +225,22 @@
   }
 
   /**
-   * 오늘 화면: 지난 기한 / 오늘 / 앞으로 horizon일 (하위 할 일도 마감일이 있으면 포함)
-   * + 날짜 없음 (미완료 상위 할 일, 목록 순서대로)
+   * 할 일 전체 목록을 묶음으로 (오늘 화면과 캘린더의 그날 칸이 같이 씀).
+   * 할 일은 마감날에만 하는 게 아니므로, 마감이 멀거나 날짜가 없어도 모두 보여 줍니다.
+   * - due:     고른 날(day) 마감 — 하위 할 일 포함, opts.includeDone이면 완료한 것도
+   * - overdue: 오늘(today) 기준 지난 기한 — 하위 할 일 포함, due에 이미 나온 것은 뺌
+   * - ahead:   나머지 미완료 상위 할 일 — 날짜순, 날짜 없는 것은 맨 아래(목록 순서대로)
    */
-  function todayTasks(tasks, today, horizon) {
-    var limit = addDays(today, horizon || 14);
+  function taskSections(tasks, day, today, opts) {
+    opts = opts || {};
     var all = tasks || [];
-    var open = sortTasks(all.filter(function (t) { return !t.done && t.due; }));
-    return {
-      overdue: open.filter(function (t) { return t.due < today; }),
-      today: open.filter(function (t) { return t.due === today; }),
-      upcoming: open.filter(function (t) { return t.due > today && t.due <= limit && !t.parent; }),
-      nodate: all.filter(function (t) { return !t.done && !t.due && !t.parent; }).sort(byPosition)
-    };
+    var shown = {};
+    var mark = function (list) { list.forEach(function (t) { shown[t.id] = 1; }); return list; };
+    var due = mark(sortTasks(all.filter(function (t) { return t.due === day && (opts.includeDone || !t.done); })));
+    var overdue = mark(sortTasks(all.filter(function (t) { return !t.done && t.due && t.due < today && !shown[t.id]; })));
+    var dated = sortTasks(all.filter(function (t) { return !t.done && !t.parent && t.due && !shown[t.id]; }));
+    var undated = all.filter(function (t) { return !t.done && !t.parent && !t.due; }).sort(byPosition);
+    return { due: due, overdue: overdue, ahead: dated.concat(undated) };
   }
 
   function subtasksOf(tasks, id) {
@@ -270,7 +273,7 @@
     eventSpan: eventSpan, eventsOn: eventsOn, eventStartLabel: eventStartLabel, eventWhen: eventWhen,
     eventTimeRange: eventTimeRange, mergeEvents: mergeEvents,
     normalizeNl: normalizeNl, parseMemo: parseMemo, insertMemoEntry: insertMemoEntry, removeMemoEntry: removeMemoEntry,
-    sortTasks: sortTasks, weekEnd: weekEnd, groupTasks: groupTasks, doneTasks: doneTasks, todayTasks: todayTasks,
+    sortTasks: sortTasks, weekEnd: weekEnd, groupTasks: groupTasks, doneTasks: doneTasks, taskSections: taskSections,
     subtasksOf: subtasksOf, tasksDueOn: tasksDueOn,
     esc: esc, safeColor: safeColor, safeUrl: safeUrl, stripHtml: stripHtml
   };

@@ -390,6 +390,34 @@ async function run() {
   check('다시 펴면: 고른 보기(그날 크게)로', !(await panes()).cal);
   await click('.dp-head [data-act="cal-layout"][data-layout="split"]'); await sleep(200);
 
+  /* ---------- 할 일 전체 목록 (오늘 화면, 캘린더 그날 칸) ---------- */
+  console.log('[할 일 전체 목록]');
+  await open(...UNFOLDED);
+  // 마감이 40일 뒤인 할 일을 구글(가짜)에 넣고 다시 불러옴
+  await evaluate(`(() => { const d = new Date(); d.setDate(d.getDate() + 40); const ymd = d.toISOString().slice(0, 10);
+    window.__fake.data.tasks.L1.push({ id: 't-far', title: '연말 성과 보고', status: 'needsAction', due: ymd + 'T00:00:00.000Z', position: '00000000000000000099' }); return true; })()`);
+  await backgroundSync(); await sleep(900);
+  const ids = (sel) => evaluate(`[...document.querySelectorAll("${sel} input[data-act=toggle]")].map(i => i.dataset.id)`);
+  let list = await ids('.today');
+  check('오늘: 마감이 먼(40일 뒤) 할 일도 보임', list.includes('t-far'), list.join(','));
+  check('오늘: 순서 — 날짜순, 먼 마감은 날짜 있는 것 끝, 날짜 없는 것은 맨 아래', list.indexOf('t-budget') < list.indexOf('t-far') && list[list.length - 1] === 't-card', list.join(','));
+  await shot('61-unfolded-today-all-tasks');
+
+  await click('.tab[data-view="calendar"]'); await sleep(300);
+  const seminarDay = await evaluate('__fake.data.tasks.L1.find(t => t.id === "t-seminar").due.slice(0, 10)');
+  await click(`.day[data-date="${seminarDay}"]`); await sleep(300);
+  list = await ids('.day-panel');
+  const labels = await evaluate('[...document.querySelectorAll(".day-panel .g-label")].map(e => e.textContent.trim())');
+  check('그날 칸: 그날 마감 → 지난 기한 → 앞으로 할 일', labels.length === 3 && /마감$/.test(labels[0]) && labels[1] === '지난 기한' && labels[2] === '앞으로 할 일', labels.join(' / '));
+  check('그날 칸: 그날 마감 할 일이 맨 위', list[0] === 't-seminar', list.join(','));
+  check('그날 칸: 다른 날 마감·먼 마감·날짜 없는 할 일도 목록에', ['t-receipt', 't-reply', 't-report', 't-budget', 't-far', 't-card'].every((id) => list.includes(id)) && list[list.length - 1] === 't-card', list.join(','));
+  check('그날 칸: 같은 할 일이 두 번 나오지 않음', new Set(list).size === list.length);
+  check('그날 칸: 추가 버튼이 목록 위(날짜 바로 아래)', await evaluate('(() => { const p = document.querySelector(".day-panel"); const a = p.querySelector(".dp-actions"); const s = p.querySelector("section"); return !!(a && s && (a.compareDocumentPosition(s) & Node.DOCUMENT_POSITION_FOLLOWING)); })()'));
+  await shot('62-unfolded-day-all-tasks');
+  await click('[data-act="cal-layout"][data-layout="day"]'); await sleep(250);
+  await shot('63-unfolded-day-full-all-tasks');
+  await click('[data-act="cal-layout"][data-layout="split"]'); await sleep(200);
+
   /* ---------- 구글 연결 ---------- */
   console.log('[구글 연결]');
   await open(...FOLDED, '?noauth');
