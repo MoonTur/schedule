@@ -1,8 +1,8 @@
 /*
- * 개발용 가짜 구글 서비스 — 실제 계정 없이 앱을 시험하기 위한 것입니다.
- * Apps Script의 Calendar / Tasks 고급 서비스, Session, CacheService 흉내를 내고,
- * 브라우저 미리보기에서는 google.script.run 도 흉내 냅니다.
- * (구글에 올리는 파일이 아닙니다. apps-script/ 폴더만 올립니다.)
+ * 개발용 가짜 구글 캘린더·Google Tasks — 실제 계정 없이 앱을 시험하기 위한 것입니다.
+ * 구글 REST API의 동작(목록·쪽 나누기·만들기·고치기·지우기·옮기기)을 메모리에서 흉내 내고,
+ * 시안과 같은 예시 데이터를 오늘 날짜 기준으로 채웁니다.
+ * dev/fake-fetch.js가 실제 구글 주소로 가는 요청을 여기로 보냅니다. (배포되는 파일이 아닙니다.)
  */
 (function (root) {
   'use strict';
@@ -281,54 +281,8 @@
       },
     };
 
-    const cacheMap = {};
-    const CacheService = {
-      getUserCache() {
-        return {
-          get(k) { return Object.prototype.hasOwnProperty.call(cacheMap, k) ? cacheMap[k] : null; },
-          put(k, v) { cacheMap[k] = String(v); },
-        };
-      },
-    };
-    const Session = { getScriptTimeZone() { return 'Asia/Seoul'; } };
-
-    return { Calendar, Tasks, CacheService, Session, data: { calendars, events, lists, tasks }, calls, today: T };
-  }
-
-  /** 브라우저 미리보기: google.script.run 흉내 (전역 함수를 비동기로 부름) */
-  function installScriptRun(win, delay) {
-    function runner(ok, fail) {
-      return new Proxy({}, {
-        get(_, name) {
-          if (name === 'withSuccessHandler') return (fn) => runner(fn, fail);
-          if (name === 'withFailureHandler') return (fn) => runner(ok, fn);
-          if (name === 'withUserObject') return () => runner(ok, fail);
-          return function () {
-            const args = JSON.parse(JSON.stringify(Array.prototype.slice.call(arguments)));
-            setTimeout(() => {
-              try {
-                const fn = win[name];
-                if (typeof fn !== 'function' || /_$/.test(name)) throw new Error('Script function not found: ' + String(name));
-                const r = fn.apply(null, args);
-                if (ok) ok(r === undefined ? null : JSON.parse(JSON.stringify(r)));
-              } catch (e) {
-                if (fail) fail(e);
-                else console.error(e);
-              }
-            }, delay == null ? 120 : delay);
-          };
-        },
-      });
-    }
-    win.google = {
-      script: {
-        run: runner(null, null),
-        history: { push() {}, replace() {}, setChangeHandler() {} },
-        host: { close() {} },
-      },
-    };
+    return { Calendar, Tasks, data: { calendars, events, lists, tasks }, calls, today: T };
   }
 
   root.makeFakeGoogle = makeFakeGoogle;
-  root.installScriptRun = installScriptRun;
 })(typeof window !== 'undefined' ? window : globalThis);

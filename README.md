@@ -49,7 +49,6 @@ docs/                 ← 실제 앱 (GitHub Pages가 이 폴더를 보여 줌)
   config.js           구글 OAuth 클라이언트 ID
   manifest.webmanifest, sw.js, icons/   설치·오프라인
 dev/                  ← 컴퓨터에서 시험하는 도구 (가짜 구글 API)
-apps-script/          ← 예전 Apps Script 버전 (예비용, 더 이상 고치지 않음)
 ```
 
 ## 고친 뒤 반영하기

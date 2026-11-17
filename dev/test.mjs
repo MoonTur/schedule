@@ -1,7 +1,7 @@
 // 자동 테스트: node --test dev/test.mjs  (npm test)
 // - docs/logic.js의 순수 함수 (날짜, 메모 형식, 할 일 묶기)
 // - docs/api.js를 가짜 구글 REST API(dev/fake-fetch.js)에 연결해 저장 흐름 확인
-// - apps-script/Code.gs(예비용 Apps Script 버전)도 같은 가짜 서비스로 확인
+// - docs/auth.js(로그인), docs/sw.js(서비스 워커)
 process.env.TZ = 'Asia/Seoul';
 
 import { test } from 'node:test';
@@ -100,19 +100,6 @@ function loadApi(opts) {
   api.config.onUnauthorized = (e) => unauthorized.push(e.status);
   api.config.onScopeMissing = (e) => scopeMissing.push(e.code);
   return { api, g, net, unauthorized, scopeMissing, setToken: (t) => { token = t; } };
-}
-
-function loadServer(opts) {
-  const ctx = vm.createContext({ console });
-  vm.runInContext(read('dev/fake-google.js'), ctx, { filename: 'fake-google.js' });
-  const g = ctx.makeFakeGoogle(Object.assign({ sample: true, today: TODAY }, opts));
-  ctx.Calendar = g.Calendar;
-  ctx.Tasks = g.Tasks;
-  ctx.Session = g.Session;
-  ctx.CacheService = g.CacheService;
-  ctx.HtmlService = {};
-  vm.runInContext(read('apps-script/Code.gs'), ctx, { filename: 'Code.gs' });
-  return { ctx, g };
 }
 
 const L = loadLogic();
@@ -288,150 +275,6 @@ test('글자 이스케이프, 색, 주소 확인', () => {
   assert.equal(L.stripHtml('<p>자문위원 3명</p><br>자료: &amp; 초안'), '자문위원 3명\n\n자료: & 초안');
 });
 
-/* ================= 서버 (Code.gs + 가짜 구글) ================= */
-
-test('처음 불러오기: 기본 목록, 보이는 캘린더만, 취소된 일정 제외, 숨겨진 완료 할 일 포함', () => {
-  const { ctx } = loadServer();
-  const r = L.monthRange('2026-11');
-  const data = plain(ctx.getBootstrap(r.startIso, r.endIso, ''));
-  assert.equal(data.listId, 'L1');
-  eq(data.tasklists.map((l) => l.title), ['내 할 일', '개인']);
-  assert.equal(data.calendars[0].name, '내 캘린더');
-  const ids = data.events.map((e) => e.id);
-  assert.ok(!ids.includes('e-hidden'), '체크 안 한 캘린더 일정은 빼야 함');
-  assert.ok(!ids.includes('e-cancel'), '취소된 일정은 빼야 함');
-  assert.ok(ids.includes('e-advice') && ids.includes('e-dinner'));
-  assert.equal(data.events.find((e) => e.id === 'e-work').color, '#ffb878', '일정마다 고른 색 반영');
-  assert.equal(data.events.find((e) => e.id === 'e-dinner').color, '#33B679', '캘린더 색 반영');
-  assert.equal(data.events.find((e) => e.id === 'weekly_20261117').recurring, true);
-  assert.equal(data.tasks.length, 17);
-  assert.ok(data.tasks.find((t) => t.id === 't-abstract').done, '휴대폰에서 완료해 숨겨진 할 일도 읽음');
-  assert.equal(data.tasks.find((t) => t.id === 't-report').due, '2026-11-27');
-});
-
-test('처음 불러오기: 보고 있던 목록을 기억함', () => {
-  const { ctx } = loadServer();
-  const r = L.monthRange('2026-11');
-  const data = plain(ctx.getBootstrap(r.startIso, r.endIso, 'L2'));
-  assert.equal(data.listId, 'L2');
-  eq(data.tasks.map((t) => t.title), ['운동 등록']);
-});
-
-test('할 일이 100개를 넘어도 다 읽음 (여러 쪽)', () => {
-  const { ctx } = loadServer();
-  for (let i = 0; i < 130; i++) ctx.createTask('L2', { title: '할 일 ' + i });
-  assert.equal(ctx.getTasks('L2').length, 131);
-});
-
-test('할 일 만들기: 마감일, 하위 할 일, 순서', () => {
-  const { ctx } = loadServer();
-  const t = plain(ctx.createTask('L1', { title: '  새 할 일 ', due: '2026-11-20' }));
-  assert.equal(t.title, '새 할 일');
-  assert.equal(t.due, '2026-11-20');
-  const s = plain(ctx.createTask('L1', { title: '마지막 하위', parent: 't-report', previous: 's-rep-5' }));
-  assert.equal(s.parent, 't-report');
-  const kids = L.subtasksOf(plain(ctx.getTasks('L1')), 't-report').map((x) => x.title);
-  assert.equal(kids[kids.length - 1], '마지막 하위');
-  assert.throws(() => ctx.createTask('L1', { title: '   ' }), /제목/);
-  assert.throws(() => ctx.createTask('L1', { title: 'x', due: '11/20' }), /날짜 형식/);
-});
-
-test('할 일 고치기: 완료 ↔ 미완료, 마감일 지우기, 제목', () => {
-  const { ctx } = loadServer();
-  let t = plain(ctx.updateTask('L1', 't-reply', { done: true }));
-  assert.equal(t.done, true);
-  assert.ok(t.completed);
-  t = plain(ctx.updateTask('L1', 't-reply', { done: false }));
-  assert.equal(t.done, false);
-  assert.equal(t.completed, '');
-  t = plain(ctx.updateTask('L1', 't-reply', { due: '' }));
-  assert.equal(t.due, '');
-  t = plain(ctx.updateTask('L1', 't-reply', { title: '회신 메일' }));
-  assert.equal(t.title, '회신 메일');
-  assert.throws(() => ctx.updateTask('L1', 't-reply', { title: ' ' }), /비워 둘 수 없습니다/);
-});
-
-test('할 일 고치기: 다른 앱에서 바꾼 메모는 지워지지 않음', () => {
-  const { ctx, g } = loadServer();
-  g.data.tasks.L1.find((t) => t.id === 't-reply').notes = 'Tasks 앱에서 쓴 메모';
-  const t = plain(ctx.updateTask('L1', 't-reply', { done: true }));
-  assert.equal(t.notes, 'Tasks 앱에서 쓴 메모');
-});
-
-test('메모 추가: 날짜 없는 글 아래, 최신이 위 — 화면 쪽 규칙과 같음', () => {
-  const { ctx } = loadServer();
-  const t = plain(ctx.appendMemo('L1', 't-report', TODAY, '오늘 회의 결과'));
-  const m = L.parseMemo(t.notes);
-  assert.equal(m.loose, '목표 분량: 30쪽 내외');
-  assert.equal(m.entries[0].date, TODAY);
-  assert.equal(m.entries[0].text, '오늘 회의 결과');
-  assert.equal(m.entries.length, 4);
-  const samples = ['', '글만', NOTES, '[2026-01-01] a\n\n'];
-  samples.forEach((s) => assert.equal(ctx.insertMemoEntry_(s, TODAY, '새'), L.insertMemoEntry(s, TODAY, '새')));
-  assert.throws(() => ctx.appendMemo('L1', 't-report', TODAY, '   '), /메모 내용/);
-});
-
-test('메모 추가: 8,192자를 넘으면 저장하지 않음', () => {
-  const { ctx } = loadServer();
-  assert.throws(() => ctx.appendMemo('L1', 't-card', TODAY, 'ㄱ'.repeat(8200)), /8,192자/);
-});
-
-test('메모 전체 바꾸기: 그 사이 다른 곳에서 바뀌었으면 덮어쓰지 않음', () => {
-  const { ctx, g } = loadServer();
-  const cur = g.data.tasks.L1.find((t) => t.id === 't-seminar').notes;
-  const next = L.removeMemoEntry(cur, 0);
-  const t = plain(ctx.replaceNotes('L1', 't-seminar', cur, next));
-  assert.equal(L.parseMemo(t.notes).entries.length, 1);
-  assert.throws(() => ctx.replaceNotes('L1', 't-seminar', cur, ''), /다른 곳에서 메모가 바뀌었습니다/);
-  const cleared = plain(ctx.replaceNotes('L1', 't-seminar', t.notes, ''));
-  assert.equal(cleared.notes, '');
-});
-
-test('할 일 지우기: 하위 할 일도 함께', () => {
-  const { ctx } = loadServer();
-  const kids = L.subtasksOf(plain(ctx.getTasks('L1')), 't-seminar').map((k) => k.id);
-  ctx.deleteTask('L1', 't-seminar', kids);
-  const left = plain(ctx.getTasks('L1'));
-  assert.ok(!left.some((t) => t.id === 't-seminar' || t.parent === 't-seminar'));
-});
-
-test('일정 만들기: 시간 일정, 여러 날 종일 일정(끝 날짜 +1)', () => {
-  const { ctx, g } = loadServer();
-  const a = plain(ctx.saveEvent({ title: '회의', calendarId: 'me@example.com', date: TODAY, startTime: '09:00', endTime: '10:30', timeZone: 'Asia/Seoul' }));
-  const evA = g.data.events['me@example.com'].find((e) => e.id === a.id);
-  eq(plain(evA.start), { dateTime: '2026-11-17T09:00:00', timeZone: 'Asia/Seoul' });
-  const b = plain(ctx.saveEvent({ title: '휴가', calendarId: 'me@example.com', date: '2026-11-19', endDate: '2026-11-20', allDay: true }));
-  const evB = g.data.events['me@example.com'].find((e) => e.id === b.id);
-  eq(plain(evB.end), { date: '2026-11-21' });
-  assert.throws(() => ctx.saveEvent({ title: 'x', calendarId: 'me@example.com', date: TODAY, startTime: '10:00', endTime: '09:00' }), /늦어야/);
-  assert.throws(() => ctx.saveEvent({ title: 'x', calendarId: 'ko.south_korea#holiday@group.v.calendar.google.com', date: TODAY, allDay: true }), /Forbidden/);
-});
-
-test('일정 고치기: 시간 일정 → 종일, 캘린더 옮기기, 서식 있는 설명은 안 바꾸면 그대로', () => {
-  const { ctx, g } = loadServer();
-  ctx.saveEvent({
-    id: 'e-advice', originalCalendarId: 'me@example.com', calendarId: 'personal@group.calendar.google.com',
-    title: '자문회의(변경)', date: TODAY, allDay: true, location: '',
-  });
-  assert.ok(!g.data.events['me@example.com'].some((e) => e.id === 'e-advice'));
-  const ev = g.data.events['personal@group.calendar.google.com'].find((e) => e.id === 'e-advice');
-  assert.equal(ev.summary, '자문회의(변경)');
-  eq(plain(ev.start), { date: TODAY });
-  assert.equal(ev.description, '<p>자문위원 3명 참석</p><br>자료: 3장 초안');
-});
-
-test('일정 지우기', () => {
-  const { ctx, g } = loadServer();
-  ctx.deleteEvent('personal@group.calendar.google.com', 'e-dinner');
-  assert.ok(!g.data.events['personal@group.calendar.google.com'].some((e) => e.id === 'e-dinner'));
-});
-
-test('잘못된 요청은 막음', () => {
-  const { ctx } = loadServer();
-  assert.throws(() => ctx.getEvents('어제', '내일'), /기간 형식/);
-  assert.throws(() => ctx.updateTask('', 't-reply', {}), /잘못된 요청/);
-});
-
 /* ================= 설치형 앱: docs/api.js + 가짜 구글 REST ================= */
 
 const RANGE = L.monthRange('2026-11');
@@ -451,6 +294,26 @@ test('API 처음 불러오기: 기본 목록, 보이는 캘린더만, 취소 일
   assert.ok(net.calls.includes('GET /calendar/v3/users/me/calendarList'));
   assert.ok(net.calls.includes('GET /calendar/v3/calendars/ko.south_korea%23holiday%40group.v.calendar.google.com/events'));
   assert.ok(net.calls.includes('GET /tasks/v1/lists/L1/tasks'));
+});
+
+test('API 처음 불러오기: 보고 있던 목록을 기억함', async () => {
+  const { api } = loadApi();
+  const data = plain(await api.getBootstrap(RANGE.startIso, RANGE.endIso, 'L2'));
+  assert.equal(data.listId, 'L2');
+  assert.deepEqual(data.tasks.map((t) => t.title), ['운동 등록']);
+  const fallback = plain(await api.getBootstrap(RANGE.startIso, RANGE.endIso, '없는-목록'));
+  assert.equal(fallback.listId, 'L1', '없는 목록이면 기본 목록');
+});
+
+test('API 잘못된 요청은 구글에 보내기 전에 막음', async () => {
+  const { api, net } = loadApi();
+  const before = net.calls.length;
+  await assert.rejects(api.getEvents('어제', '내일'), /기간 형식/);
+  await assert.rejects(api.updateTask('', 't-reply', {}), /잘못된 요청/);
+  await assert.rejects(api.saveEvent({ title: ' ', calendarId: 'me@example.com', date: TODAY, allDay: true }), /제목/);
+  await assert.rejects(api.appendMemo('L1', 't-report', TODAY, '   '), /메모 내용/);
+  // getEvents는 캘린더 목록을 먼저 받으므로 그 한 번만 허용, 잘못된 기간으로 일정 요청은 안 보냄
+  assert.ok(!net.calls.slice(before).some((c) => c.includes('/events')));
 });
 
 test('API 할 일 100개 넘어도 다 읽음 (여러 쪽)', async () => {
