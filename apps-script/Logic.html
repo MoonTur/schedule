@@ -1,0 +1,279 @@
+<script>
+/*
+ * 순수 함수 모음 — 날짜 계산, 메모 기록 형식, 할 일 묶기.
+ * 브라우저(window.Logic)와 Node 테스트(dev/test.mjs)에서 같은 코드를 씁니다.
+ *
+ * 메모 기록 형식 (Google Tasks 메모 칸에 그대로 저장됨):
+ *   (날짜 없는 글이 있으면 맨 위에 그대로 둠)
+ *   [2026-11-17] 가장 최근 메모
+ *   [2026-11-13] 그 전 메모
+ *   두 번째 줄도 같은 메모에 속함
+ */
+(function (root) {
+  'use strict';
+
+  var WEEK = ['일', '월', '화', '수', '목', '금', '토'];
+  var MEMO_HEADER = /^\[(\d{4}-\d{2}-\d{2})\][ \t]?(.*)$/;
+  var NOTES_LIMIT = 8192;
+
+  /* ---------- 날짜 ---------- */
+
+  function pad(n) { return (n < 10 ? '0' : '') + n; }
+  function ymd(d) { return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()); }
+  function parseYmd(s) { var p = String(s).split('-'); return new Date(+p[0], +p[1] - 1, +p[2]); }
+  function addDays(s, n) { var d = parseYmd(s); d.setDate(d.getDate() + n); return ymd(d); }
+  function diffDays(from, to) { return Math.round((parseYmd(to) - parseYmd(from)) / 86400000); }
+  function weekdayIndex(s) { return parseYmd(s).getDay(); }
+
+  function fmtMD(s, refYear) {
+    var d = parseYmd(s);
+    var md = (d.getMonth() + 1) + '/' + d.getDate() + ' (' + WEEK[d.getDay()] + ')';
+    return refYear && d.getFullYear() !== refYear ? d.getFullYear() + '/' + md : md;
+  }
+  function fmtLong(s) {
+    var d = parseYmd(s);
+    return (d.getMonth() + 1) + '월 ' + d.getDate() + '일 ' + WEEK[d.getDay()] + '요일';
+  }
+  function fmtTime(iso) { var d = new Date(iso); return pad(d.getHours()) + ':' + pad(d.getMinutes()); }
+  function timeHM(iso) { return fmtTime(iso); }
+
+  /** 마감일 표시: 지남 / 오늘 / D-n */
+  function dueInfo(due, today) {
+    if (!due) return { text: '', tone: '', days: null };
+    var n = diffDays(today, due);
+    if (n < 0) return { text: (-n) + '일 지남', tone: 'danger', days: n };
+    if (n === 0) return { text: '오늘 마감', tone: 'today', days: 0 };
+    return { text: 'D-' + n, tone: n <= 3 ? 'soon' : '', days: n };
+  }
+
+  /* ---------- 달력 ---------- */
+
+  function shiftMonth(key, n) {
+    var p = key.split('-');
+    var d = new Date(+p[0], +p[1] - 1 + n, 1);
+    return d.getFullYear() + '-' + pad(d.getMonth() + 1);
+  }
+  function monthLabel(key) { var p = key.split('-'); return p[0] + '년 ' + (+p[1]) + '월'; }
+
+  /** 일요일 시작 주 단위로 그 달을 덮는 날짜 배열 [[ymd x7], ...] */
+  function monthWeeks(key) {
+    var p = key.split('-');
+    var y = +p[0], m = +p[1] - 1;
+    var lead = new Date(y, m, 1).getDay();
+    var days = new Date(y, m + 1, 0).getDate();
+    var count = Math.ceil((lead + days) / 7);
+    var weeks = [];
+    for (var w = 0; w < count; w++) {
+      var row = [];
+      for (var i = 0; i < 7; i++) row.push(ymd(new Date(y, m, 1 - lead + w * 7 + i)));
+      weeks.push(row);
+    }
+    return weeks;
+  }
+
+  /** 달력 화면이 덮는 기간 (서버에 일정을 요청할 때 씀). end는 다음 날 0시(포함 안 함). */
+  function monthRange(key) {
+    var weeks = monthWeeks(key);
+    var start = weeks[0][0];
+    var end = addDays(weeks[weeks.length - 1][6], 1);
+    return { start: start, end: end, startIso: parseYmd(start).toISOString(), endIso: parseYmd(end).toISOString() };
+  }
+
+  /* ---------- 일정 ---------- */
+
+  /** 일정이 걸친 날짜 범위 {from, to} (둘 다 포함) */
+  function eventSpan(ev) {
+    if (ev.allDay) {
+      var last = addDays(ev.end, -1);
+      return { from: ev.start, to: last < ev.start ? ev.start : last };
+    }
+    var s = new Date(ev.start), e = new Date(ev.end);
+    return { from: ymd(s), to: ymd(new Date(Math.max(s.getTime(), e.getTime() - 1))) };
+  }
+
+  function eventsOn(events, day) {
+    return (events || []).filter(function (ev) {
+      var sp = eventSpan(ev);
+      return sp.from <= day && day <= sp.to;
+    }).sort(function (a, b) {
+      if (a.allDay !== b.allDay) return a.allDay ? -1 : 1;
+      if (a.allDay) return a.title.localeCompare(b.title);
+      return new Date(a.start) - new Date(b.start);
+    });
+  }
+
+  /** 목록 왼쪽 칸에 쓰는 짧은 시각 */
+  function eventStartLabel(ev, day) {
+    if (ev.allDay) return '종일';
+    return eventSpan(ev).from === day ? fmtTime(ev.start) : '계속';
+  }
+
+  /** "10:00–11:00", "종일", 여러 날이면 "11/17 (화) 10:00 – 11/18 (수) 09:00" */
+  function eventWhen(ev, refYear) {
+    var sp = eventSpan(ev);
+    if (ev.allDay) return sp.from === sp.to ? fmtMD(sp.from, refYear) + ' · 종일' : fmtMD(sp.from, refYear) + ' – ' + fmtMD(sp.to, refYear) + ' · 종일';
+    if (sp.from === sp.to) return fmtMD(sp.from, refYear) + ' · ' + fmtTime(ev.start) + '–' + fmtTime(ev.end);
+    return fmtMD(sp.from, refYear) + ' ' + fmtTime(ev.start) + ' – ' + fmtMD(sp.to, refYear) + ' ' + fmtTime(ev.end);
+  }
+
+  function eventTimeRange(ev, day) {
+    if (ev.allDay) return '종일';
+    var sp = eventSpan(ev);
+    var st = sp.from === day ? fmtTime(ev.start) : '00:00';
+    var en = sp.to === day ? fmtTime(ev.end) : '24:00';
+    return st + '–' + en;
+  }
+
+  /** 여러 달치 캐시에서 같은 일정이 겹치지 않게 합침 */
+  function mergeEvents(lists) {
+    var seen = {}, out = [];
+    (lists || []).forEach(function (arr) {
+      (arr || []).forEach(function (ev) {
+        var k = ev.calendarId + '|' + ev.id;
+        if (!seen[k]) { seen[k] = 1; out.push(ev); }
+      });
+    });
+    return out;
+  }
+
+  /* ---------- 메모 ---------- */
+
+  function normalizeNl(s) { return String(s || '').replace(/\r\n?/g, '\n'); }
+
+  /** 메모 칸 → { loose: 날짜 없는 글, entries: [{date, text, start, end}] } (start/end = 줄 번호) */
+  function parseMemo(notes) {
+    var text = normalizeNl(notes);
+    if (!text.trim()) return { loose: '', entries: [] };
+    var entries = [], loose = [], cur = null;
+    text.split('\n').forEach(function (line, i) {
+      var m = MEMO_HEADER.exec(line);
+      if (m) { cur = { date: m[1], lines: [m[2]], start: i, end: i }; entries.push(cur); }
+      else if (cur) { cur.lines.push(line); cur.end = i; }
+      else loose.push(line);
+    });
+    return {
+      loose: loose.join('\n').trim(),
+      entries: entries.map(function (e) {
+        return { date: e.date, text: e.lines.join('\n').replace(/\s+$/, ''), start: e.start, end: e.end };
+      })
+    };
+  }
+
+  /** 새 메모를 날짜 없는 글 바로 아래, 기존 날짜 메모들 맨 위에 넣음 (서버 Code.gs와 같은 규칙) */
+  function insertMemoEntry(notes, date, text) {
+    var entry = '[' + date + '] ' + normalizeNl(text).trim();
+    var current = normalizeNl(notes);
+    if (!current.trim()) return entry;
+    var lines = current.split('\n');
+    for (var i = 0; i < lines.length; i++) {
+      if (MEMO_HEADER.test(lines[i])) {
+        lines.splice.apply(lines, [i, 0].concat(entry.split('\n')));
+        return lines.join('\n');
+      }
+    }
+    return current.replace(/\s+$/, '') + '\n' + entry;
+  }
+
+  function removeMemoEntry(notes, index) {
+    var parsed = parseMemo(notes);
+    var e = parsed.entries[index];
+    var text = normalizeNl(notes);
+    if (!e) return text;
+    var lines = text.split('\n');
+    lines.splice(e.start, e.end - e.start + 1);
+    return lines.join('\n').replace(/^\n+|\s+$/g, '');
+  }
+
+  /* ---------- 할 일 ---------- */
+
+  function sortTasks(list) {
+    return (list || []).slice().sort(function (a, b) {
+      if (!!a.due !== !!b.due) return a.due ? -1 : 1;
+      if (a.due !== b.due) return a.due < b.due ? -1 : 1;
+      var pa = a.position || '', pb = b.position || '';
+      return pa < pb ? -1 : pa > pb ? 1 : 0;
+    });
+  }
+
+  function byPosition(a, b) {
+    var pa = a.position || '', pb = b.position || '';
+    return pa < pb ? -1 : pa > pb ? 1 : 0;
+  }
+
+  function weekEnd(today) { return addDays(today, 6 - weekdayIndex(today)); }
+
+  /** 할 일 목록 화면: 미완료 상위 할 일을 마감일로 묶음 */
+  function groupTasks(tasks, today) {
+    var we = weekEnd(today);
+    var groups = [
+      { key: 'overdue', label: '지난 기한', tone: 'danger', items: [] },
+      { key: 'today', label: '오늘', tone: '', items: [] },
+      { key: 'week', label: '이번 주', tone: '', items: [] },
+      { key: 'later', label: '다음 주 이후', tone: '', items: [] },
+      { key: 'nodate', label: '날짜 없음', tone: '', items: [] }
+    ];
+    sortTasks((tasks || []).filter(function (t) { return !t.parent && !t.done; })).forEach(function (t) {
+      var g = !t.due ? 4 : t.due < today ? 0 : t.due === today ? 1 : t.due <= we ? 2 : 3;
+      groups[g].items.push(t);
+    });
+    return groups.filter(function (g) { return g.items.length; });
+  }
+
+  function doneTasks(tasks) {
+    return (tasks || []).filter(function (t) { return !t.parent && t.done; }).sort(function (a, b) {
+      return (b.completed || '').localeCompare(a.completed || '');
+    });
+  }
+
+  /**
+   * 오늘 화면: 지난 기한 / 오늘 / 앞으로 horizon일 (하위 할 일도 마감일이 있으면 포함)
+   * + 날짜 없음 (미완료 상위 할 일, 목록 순서대로)
+   */
+  function todayTasks(tasks, today, horizon) {
+    var limit = addDays(today, horizon || 14);
+    var all = tasks || [];
+    var open = sortTasks(all.filter(function (t) { return !t.done && t.due; }));
+    return {
+      overdue: open.filter(function (t) { return t.due < today; }),
+      today: open.filter(function (t) { return t.due === today; }),
+      upcoming: open.filter(function (t) { return t.due > today && t.due <= limit && !t.parent; }),
+      nodate: all.filter(function (t) { return !t.done && !t.due && !t.parent; }).sort(byPosition)
+    };
+  }
+
+  function subtasksOf(tasks, id) {
+    return (tasks || []).filter(function (t) { return t.parent === id; }).sort(byPosition);
+  }
+
+  function tasksDueOn(tasks, day) {
+    return sortTasks((tasks || []).filter(function (t) { return t.due === day; }));
+  }
+
+  /* ---------- 화면 안전 ---------- */
+
+  var ESC = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
+  function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return ESC[c]; }); }
+  function safeColor(c, fallback) { return /^#[0-9a-fA-F]{3,8}$/.test(c || '') ? c : (fallback || '#2563EB'); }
+  function safeUrl(u) { return /^https:\/\//i.test(u || '') ? u : ''; }
+  function stripHtml(s) {
+    return String(s || '')
+      .replace(/<br\s*\/?>/gi, '\n').replace(/<\/(p|div|li)>/gi, '\n').replace(/<[^>]+>/g, '')
+      .replace(/&nbsp;/g, ' ').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+      .replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, '&')
+      .replace(/\n{3,}/g, '\n\n').trim();
+  }
+
+  root.Logic = {
+    WEEK: WEEK, NOTES_LIMIT: NOTES_LIMIT,
+    pad: pad, ymd: ymd, parseYmd: parseYmd, addDays: addDays, diffDays: diffDays, weekdayIndex: weekdayIndex,
+    fmtMD: fmtMD, fmtLong: fmtLong, fmtTime: fmtTime, timeHM: timeHM, dueInfo: dueInfo,
+    shiftMonth: shiftMonth, monthLabel: monthLabel, monthWeeks: monthWeeks, monthRange: monthRange,
+    eventSpan: eventSpan, eventsOn: eventsOn, eventStartLabel: eventStartLabel, eventWhen: eventWhen,
+    eventTimeRange: eventTimeRange, mergeEvents: mergeEvents,
+    normalizeNl: normalizeNl, parseMemo: parseMemo, insertMemoEntry: insertMemoEntry, removeMemoEntry: removeMemoEntry,
+    sortTasks: sortTasks, weekEnd: weekEnd, groupTasks: groupTasks, doneTasks: doneTasks, todayTasks: todayTasks,
+    subtasksOf: subtasksOf, tasksDueOn: tasksDueOn,
+    esc: esc, safeColor: safeColor, safeUrl: safeUrl, stripHtml: stripHtml
+  };
+})(typeof window !== 'undefined' ? window : globalThis);
+</script>
