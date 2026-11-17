@@ -25,7 +25,20 @@
   const config = {
     getToken: () => '',
     onUnauthorized: () => {},
+    onScopeMissing: () => {},   // 구글 권한 화면에서 일부 항목을 빼고 허용한 경우
   };
+
+  /** 403 중 '권한 범위 부족' (사용자가 권한 일부를 허용하지 않음) */
+  function isScopeError(status, data) {
+    if (status !== 403 || !data || !data.error) return false;
+    const reasons = [];
+    (data.error.errors || []).forEach((x) => { if (x && x.reason) reasons.push(x.reason); });
+    (data.error.details || []).forEach((x) => { if (x && x.reason) reasons.push(x.reason); });
+    return /insufficient authentication scopes/i.test(data.error.message || '') ||
+      reasons.some((r) => /insufficientPermissions|SCOPE_INSUFFICIENT/i.test(r));
+  }
+  /** 이 오류는 캘린더 하나만의 문제가 아니므로 삼키지 말고 위로 올림 */
+  const mustRaise = (e) => e && (e.status === 401 || e.code === 'scope');
 
   /* ================= HTTP ================= */
 
@@ -59,8 +72,14 @@
     }
     if (!res.ok) {
       const msg = (data && data.error && data.error.message) || res.statusText || ('HTTP ' + res.status);
-      const err = new ApiError(res.status, res.status === 401 ? '구글 연결이 만료되었습니다.' : msg);
+      const scope = isScopeError(res.status, data);
+      const err = new ApiError(res.status,
+        res.status === 401 ? '구글 연결이 만료되었습니다.'
+          : scope ? '구글 권한이 일부 빠져 있습니다. 다시 연결해 세 항목을 모두 허용해 주세요.'
+            : msg);
+      if (scope) err.code = 'scope';
       if (res.status === 401) config.onUnauthorized(err);
+      if (scope) config.onScopeMissing(err);
       throw err;
     }
     return data;
@@ -122,7 +141,7 @@
       Object.keys((res && res.event) || {}).forEach((k) => { map[k] = res.event[k].background; });
       colorCache = map;
     } catch (e) {
-      if (e.status === 401) throw e;
+      if (mustRaise(e)) throw e;
       colorCache = {};
     }
     return colorCache;
@@ -139,7 +158,7 @@
         });
         return items.filter((ev) => ev.status !== 'cancelled').map((ev) => toEvent(ev, cal, palette));
       } catch (e) {
-        if (e.status === 401) throw e;
+        if (mustRaise(e)) throw e;
         console.warn('일정을 읽지 못한 캘린더: ' + cal.id + ' — ' + e.message);
         return [];
       }
@@ -327,7 +346,7 @@
   async function deleteTask(listId, taskId, childIds) {
     listId = checkId(listId);
     await Promise.all((childIds || []).map((id) => req('DELETE', taskUrl(listId, checkId(id))).catch((e) => {
-      if (e.status === 401) throw e;
+      if (mustRaise(e)) throw e;
       console.warn('하위 할 일 삭제 실패: ' + id + ' — ' + e.message);
     })));
     await req('DELETE', taskUrl(listId, checkId(taskId)));

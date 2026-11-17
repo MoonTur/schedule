@@ -367,6 +367,33 @@ async function run() {
   check('연결 만료: 데이터는 그대로 보이고 다시 연결 안내가 뜸', (await evaluate('!document.getElementById("authBanner").hidden')) && (await text()).includes('출장비 영수증 제출'));
   await shot('43-unfolded-auth-expired');
 
+  // 검토 1번: 구글에서 뒤로 돌아와 페이지가 메모리째 되살아남 → 지금 상태(새 토큰)에 맞춰 다시 동기화
+  await evaluate(`(() => { window.__fakeFetch.validToken = null; const a = JSON.parse(localStorage.getItem('ws.auth') || '{}');
+    a.token = 'new-token'; a.expiresAt = Date.now() + 3600e3; a.granted = true; localStorage.setItem('ws.auth', JSON.stringify(a)); return true; })()`);
+  await evaluate(`window.dispatchEvent(new PageTransitionEvent('pageshow', { persisted: true })), true`); await sleep(900);
+  check('되살아난 화면: 새 토큰으로 다시 동기화하고 안내 띠를 내림',
+    (await evaluate('document.getElementById("authBanner").hidden')) && (await evaluate('document.getElementById("syncText").textContent')).startsWith('구글과 동기화됨'));
+
+  // 검토 2번: 구글 권한 화면에서 Tasks를 빼고 허용한 채 돌아옴
+  await open(...FOLDED, '?partial');
+  await shot('44-folded-scope-missing');
+  check('권한 일부만: 한국어 안내와 다시 연결 버튼', (await text()).includes('권한을 모두 허용해 주세요') && (await evaluate('!!document.querySelector("main [data-act=connect]")')));
+  check('권한 일부만: 빠진 권한으로는 구글에 요청하지 않음', (await evaluate('window.__fakeFetch.calls.length')) === 0);
+  check('권한 일부만: 상단 표시 "권한 부족"', (await evaluate('document.getElementById("syncText").textContent')) === '권한 부족');
+
+  // 검토 2번: 쓰는 중에 구글이 권한 부족(403)으로 답함 → 데이터는 그대로, 권한 안내 띠
+  await open(...UNFOLDED);
+  await evaluate(`window.__fakeFetch.failNext = { status: 403, message: 'Request had insufficient authentication scopes.' }, true`);
+  await backgroundSync(); await sleep(900);
+  check('권한 부족(403): 데이터는 그대로 보이고 권한 안내 띠', !(await evaluate('document.getElementById("authBanner").hidden')) &&
+    (await evaluate('document.getElementById("authBannerText").textContent')).includes('권한이 일부 빠져') && (await text()).includes('출장비 영수증 제출'));
+  check('권한 부족(403): 영어 오류 알림을 띄우지 않음', !(await evaluate('document.getElementById("toast").innerText')).includes('insufficient'));
+
+  // 검토 2번: 처음 불러오기 실패 화면에도 '다시 연결'
+  await open(...FOLDED, '?fail=500');
+  check('불러오기 실패 화면: 다시 시도 + 다시 연결 버튼', (await evaluate('!!document.querySelector("main [data-act=retry]") && !!document.querySelector("main [data-act=connect]")')));
+  await shot('45-folded-load-error');
+
   /* ---------- 큰 펼친 화면 ---------- */
   await open(884, 1104);
   await click('.tab[data-view="calendar"]'); await sleep(300);

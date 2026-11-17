@@ -79,6 +79,7 @@
     syncedAt: 0,
     error: '',
     needAuth: false,  // 구글 연결이 필요함 (처음이거나 만료 후 조용한 연결 실패)
+    scopeMissing: false, // 구글 권한 화면에서 일부 항목을 빼고 허용함 → 권한 화면을 다시 띄워야 함
     renderPending: false,
     pointerDown: false,
     sheetCtx: null,
@@ -114,14 +115,21 @@
 
     let html;
     let split = false;
-    if (!state.loaded && state.needAuth) html = connectScreen();
+    if (!state.loaded && state.scopeMissing) html = scopeScreen();
+    else if (!state.loaded && state.needAuth) html = connectScreen();
     else if (!state.loaded) html = state.error ? errorScreen() : '<p class="skeleton">구글 캘린더와 Tasks에서 불러오는 중…</p>';
     else if (state.view === 'today') html = renderToday();
     else if (state.view === 'tasks') { split = isWide(); html = renderTasks(); }
     else { split = isWide(); html = renderCalendar(); }
     main.classList.toggle('split', split);
     main.innerHTML = html;
-    document.getElementById('authBanner').hidden = !(state.loaded && state.needAuth);
+    const showBanner = state.loaded && (state.needAuth || state.scopeMissing);
+    document.getElementById('authBanner').hidden = !showBanner;
+    if (showBanner) {
+      document.getElementById('authBannerText').textContent = state.scopeMissing
+        ? '구글 권한이 일부 빠져 있어 저장할 수 없습니다. 다시 연결해 세 항목을 모두 허용해 주세요.'
+        : '구글 연결이 끊겼습니다. 저장하려면 다시 연결해 주세요.';
+    }
     restoreScroll(keep);
     renderSync();
   }
@@ -167,6 +175,7 @@
     const btn = document.querySelector('[data-act="refresh"]');
     btn.classList.toggle('spin', state.syncing);
     if (state.syncing) { dot.className = 'sync-dot'; txt.textContent = '동기화 중…'; }
+    else if (state.scopeMissing) { dot.className = 'sync-dot err'; txt.textContent = '권한 부족'; }
     else if (state.needAuth) { dot.className = 'sync-dot err'; txt.textContent = '구글 연결 필요'; }
     else if (state.error) { dot.className = 'sync-dot err'; txt.textContent = '연결 안 됨'; }
     else if (state.syncedAt) { dot.className = 'sync-dot ok'; txt.textContent = '구글과 동기화됨 · ' + L.fmtTime(new Date(state.syncedAt).toISOString()); }
@@ -175,7 +184,25 @@
 
   function errorScreen() {
     return `<div class="skeleton"><p>구글에서 불러오지 못했습니다.</p><p class="hint" style="margin:8px 0 16px">${esc(state.error)}</p>
-      <button type="button" class="btn primary" data-act="retry">다시 시도</button></div>`;
+      <div style="display:flex;gap:8px;justify-content:center">
+        <button type="button" class="btn" data-act="connect">다시 연결</button>
+        <button type="button" class="btn primary" data-act="retry">다시 시도</button>
+      </div></div>`;
+  }
+
+  /** 구글 권한 화면에서 일부 항목이 빠진 경우 */
+  function scopeScreen() {
+    return `<div class="connect">
+      <h2>권한을 모두 허용해 주세요</h2>
+      <p>구글 권한 화면에서 일부 항목이 빠졌습니다. 이 앱은 아래 세 가지가 모두 있어야 일정과 할 일을 보여 주고 저장할 수 있습니다.</p>
+      <ul>
+        <li>모든 캘린더의 일정 보기 및 수정</li>
+        <li>캘린더 확인 (목록·일정 보기)</li>
+        <li>할 일 생성, 수정, 정리, 삭제</li>
+      </ul>
+      <button type="button" class="btn primary connect-btn" data-act="connect">다시 연결하기</button>
+      <p class="hint">권한 화면에서 <strong>모두 선택</strong>을 체크한 뒤 <strong>계속</strong>을 눌러 주세요.</p>
+    </div>`;
   }
 
   /** 처음 쓸 때: 구글 계정 연결 */
@@ -189,7 +216,7 @@
         <li>Tasks: 할 일 보기·만들기·고치기</li>
       </ul>
       <button type="button" class="btn primary connect-btn" data-act="connect">구글 계정 연결</button>
-      <p class="hint">처음에는 ‘Google에서 확인하지 않은 앱’ 안내가 나옵니다. 직접 만든 앱이라 그렇습니다. ‘고급 → 이동’을 눌러 계속하세요.</p>
+      <p class="hint">처음에는 ‘Google에서 확인하지 않은 앱’ 안내가 나옵니다. 직접 만든 앱이라 그렇습니다. ‘고급 → 이동’을 누르고, 권한 화면에서 <strong>모두 선택</strong>을 체크한 뒤 계속을 눌러 주세요.</p>
     </div>`;
   }
 
@@ -640,6 +667,11 @@
   async function loadAll() {
     if (state.syncing) return;
     if (!Auth.token()) { needAuth(); return; }
+    if (Auth.missingScopes().length) { // 권한이 빠진 토큰으로는 부르지 않음
+      state.scopeMissing = true;
+      safeRender();
+      return;
+    }
     state.syncing = true;
     renderSync();
     const prevToday = state.today;
@@ -668,6 +700,7 @@
       state.loaded = true;
       state.error = '';
       state.needAuth = false;
+      state.scopeMissing = false;
       state.syncedAt = Date.now();
       if (state.selTaskId && !findTask(state.selTaskId)) state.selTaskId = '';
       const primary = state.calendars.find((c) => c.primary);
@@ -675,7 +708,7 @@
       cacheSave();
       if (state.month !== key) loadMonth(state.month);
     } catch (e) {
-      if (!isAuthError(e)) {
+      if (!isAuthError(e) && e.code !== 'scope') { // 연결 만료·권한 부족은 각자의 안내 화면으로 처리
         state.error = e.message || String(e);
         toast('구글에서 불러오지 못했습니다: ' + state.error, true);
       }
@@ -1255,12 +1288,12 @@
     state.showDone = !!r.showDone;
   }
 
-  /** 연결 버튼: 구글 화면으로 이동 (switchAccount: 다른 계정 고르기) */
+  /** 연결 버튼: 구글 화면으로 이동 (switchAccount: 다른 계정 고르기, 권한이 빠졌으면 권한 화면을 다시 띄움) */
   function connect(switchAccount) {
     closeSheet();
     saveResume();
     try {
-      Auth.signIn({ switchAccount: switchAccount });
+      Auth.signIn({ switchAccount: switchAccount, consent: state.scopeMissing });
     } catch (e) {
       toast(e.message, true);
     }
@@ -1303,6 +1336,23 @@
 
   window.GoogleApi.config.getToken = () => Auth.token();
   window.GoogleApi.config.onUnauthorized = () => needAuth();
+  window.GoogleApi.config.onScopeMissing = () => {
+    if (!state.scopeMissing) { state.scopeMissing = true; safeRender(); }
+  };
+
+  // 구글 화면에서 뒤로 가기로 돌아오면 크롬이 떠나기 전 화면을 메모리째 되살림 → 지금 상태에 맞춤
+  window.addEventListener('pageshow', (e) => {
+    if (!e.persisted) return;
+    state.scopeMissing = Auth.missingScopes().length > 0;
+    if (Auth.token() && !state.scopeMissing) {
+      state.needAuth = false;
+      render();
+      loadAll();
+    } else {
+      if (!Auth.token()) state.needAuth = true;
+      render();
+    }
+  });
 
   /* ---------- 시작 ---------- */
   const back = Auth.handleRedirect();
@@ -1311,8 +1361,11 @@
     if (back.silent) Auth.markSilentFailed();
     else if (back.error !== 'access_denied') toast('구글 연결에 실패했습니다 (' + back.error + ')', true);
   }
+  if (Auth.missingScopes().length) state.scopeMissing = true;
   cacheLoad();
-  if (Auth.token()) {
+  if (state.scopeMissing) {
+    render(); // 권한 화면부터 다시 받아야 함 (빠진 권한으로는 부르지 않음)
+  } else if (Auth.token()) {
     render();
     loadAll();
   } else if (Auth.canTrySilent()) {

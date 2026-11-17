@@ -20,6 +20,69 @@ function loadLogic() {
   return ctx.Logic;
 }
 
+/** docs/auth.js + 가짜 브라우저 (주소창, 기록, 저장소) */
+function loadAuth(opts) {
+  opts = opts || {};
+  const store = new Map(opts.storage || []);
+  const listeners = {};
+  const nav = [];
+  const loc = {
+    origin: 'https://moontur.github.io', pathname: '/schedule/', search: '', hash: opts.hash || '',
+    assign: (u) => nav.push(['assign', new URL(u)]), replace: (u) => nav.push(['replace', new URL(u)]),
+  };
+  const ctx = vm.createContext({
+    console, URL, URLSearchParams, crypto: globalThis.crypto,
+    localStorage: { getItem: (k) => (store.has(k) ? store.get(k) : null), setItem: (k, v) => store.set(k, String(v)), removeItem: (k) => store.delete(k) },
+    location: loc,
+    history: { state: null, replaceState: () => { loc.hash = ''; } },
+    addEventListener: (type, fn) => { (listeners[type] = listeners[type] || []).push(fn); },
+    fetch: async () => ({}),
+    APP_CONFIG: { clientId: 'cid.apps.googleusercontent.com' },
+  });
+  ctx.window = ctx;
+  vm.runInContext(read('docs/auth.js'), ctx, { filename: 'auth.js' });
+  return { Auth: ctx.Auth, store, nav, loc, fire: (type, ev) => (listeners[type] || []).forEach((f) => f(ev)) };
+}
+const SC = {
+  ro: 'https://www.googleapis.com/auth/calendar.readonly',
+  ev: 'https://www.googleapis.com/auth/calendar.events',
+  tasks: 'https://www.googleapis.com/auth/tasks',
+  calFull: 'https://www.googleapis.com/auth/calendar',
+};
+
+/** docs/sw.js + 가짜 서비스 워커 환경 */
+function loadSw(fetchImpl) {
+  const handlers = {};
+  const cache = new Map();
+  const keyOf = (req, ignoreSearch) => {
+    const u = new URL(typeof req === 'string' ? req : req.url, 'https://moontur.github.io/schedule/');
+    return ignoreSearch ? u.origin + u.pathname : u.href;
+  };
+  const caches = {
+    open: async () => ({ put: async (req, res) => { cache.set(keyOf(req, true), await res.text()); }, addAll: async () => {} }),
+    match: async (req, o) => { const k = keyOf(req, o && o.ignoreSearch); return cache.has(k) ? new Response(cache.get(k)) : undefined; },
+    keys: async () => [], delete: async () => true,
+  };
+  const self = {
+    location: { origin: 'https://moontur.github.io' }, WS_NET_TIMEOUT: 60,
+    addEventListener: (t, f) => { handlers[t] = f; }, skipWaiting: () => {}, clients: { claim: async () => {} },
+  };
+  const ctx = vm.createContext({ self, caches, fetch: fetchImpl, Response, Request, URL, setTimeout, clearTimeout, console });
+  vm.runInContext(read('docs/sw.js'), ctx, { filename: 'sw.js' });
+  return {
+    cache,
+    async get(url) {
+      let responded = null;
+      const waits = [];
+      handlers.fetch({ request: new Request(url), respondWith: (p) => { responded = p; }, waitUntil: (p) => waits.push(p) });
+      const started = Date.now();
+      const res = responded ? await responded : null;
+      return { res, body: res && res.type !== 'error' ? await res.text() : null, ms: Date.now() - started, settle: () => Promise.all(waits) };
+    },
+  };
+}
+const later = (ms, value, fail) => new Promise((ok, bad) => setTimeout(() => (fail ? bad(new TypeError('network')) : ok(value)), ms));
+
 /** docs/api.js + 가짜 구글 REST API */
 function loadApi(opts) {
   opts = opts || {};
@@ -32,9 +95,11 @@ function loadApi(opts) {
   const api = ctx.GoogleApi;
   let token = opts.token === undefined ? 'tok' : opts.token;
   const unauthorized = [];
+  const scopeMissing = [];
   api.config.getToken = () => token;
   api.config.onUnauthorized = (e) => unauthorized.push(e.status);
-  return { api, g, net, unauthorized, setToken: (t) => { token = t; } };
+  api.config.onScopeMissing = (e) => scopeMissing.push(e.code);
+  return { api, g, net, unauthorized, scopeMissing, setToken: (t) => { token = t; } };
 }
 
 function loadServer(opts) {
@@ -478,4 +543,127 @@ test('API 한 캘린더가 실패해도 나머지 일정은 보임, 서버 오�
   assert.ok(data.events.length > 0);
   net.failNext = { status: 500, message: 'Backend Error' };
   await assert.rejects(api.getTasks('L1'), (e) => e.status === 500 && e.message === 'Backend Error');
+});
+
+/* ================= 검토 1~3번 수정: 로그인·권한·서비스 워커 ================= */
+
+test('권한 부족(403): 한국어 안내 오류, 다시 허용 요청, 캘린더 하나의 문제로 삼키지 않음', async () => {
+  const { api, net, scopeMissing } = loadApi();
+  net.failNext = { status: 403, message: 'Request had insufficient authentication scopes.' };
+  await assert.rejects(api.getTasks('L1'), (e) => e.status === 403 && e.code === 'scope' && /권한이 일부 빠져/.test(e.message));
+  assert.deepEqual(plain(scopeMissing), ['scope']);
+  // 첫 요청(캘린더 목록 또는 할 일 목록)이 권한 부족이면 처음 불러오기 전체가 실패해야 함 (빈 화면이 아니라 안내)
+  net.failNext = { status: 403, message: 'Request had insufficient authentication scopes.' };
+  await assert.rejects(api.getBootstrap(RANGE.startIso, RANGE.endIso, ''), (e) => e.code === 'scope');
+  // 권한 부족이 아닌 403(쓰기 금지 캘린더 등)은 그대로
+  await assert.rejects(api.saveEvent({ title: 'x', calendarId: 'ko.south_korea#holiday@group.v.calendar.google.com', date: TODAY, allDay: true }), (e) => e.status === 403 && e.code !== 'scope');
+});
+
+test('로그인: 조용한 재연결은 기록을 바꿔치기(replace), 연결 버튼은 기록을 남김(assign)', () => {
+  const { Auth, nav, store } = loadAuth({ storage: [['ws.auth', JSON.stringify({ granted: true, hint: 'me@example.com' })]] });
+  Auth.signIn({ silent: true });
+  assert.equal(nav[0][0], 'replace');
+  assert.equal(nav[0][1].searchParams.get('prompt'), 'none');
+  assert.equal(nav[0][1].searchParams.get('login_hint'), 'me@example.com');
+  assert.equal(nav[0][1].searchParams.get('redirect_uri'), 'https://moontur.github.io/schedule/');
+  assert.equal(nav[0][1].searchParams.get('scope'), [SC.ro, SC.ev, SC.tasks].join(' '));
+  assert.ok(JSON.parse(store.get('ws.authState')).silent);
+
+  const b = loadAuth();
+  b.Auth.signIn({});
+  assert.equal(b.nav[0][0], 'assign');
+  assert.equal(b.nav[0][1].searchParams.get('prompt'), 'select_account', '처음엔 계정 고르기');
+  const c = loadAuth({ storage: [['ws.auth', JSON.stringify({ granted: true, hint: 'me@example.com' })]] });
+  c.Auth.signIn({ consent: true });
+  assert.equal(c.nav[0][1].searchParams.get('prompt'), 'consent', '빠진 권한: 권한 화면을 다시');
+});
+
+test('로그인: 구글 화면에서 뒤로 돌아와 페이지가 되살아나면 연결 버튼이 다시 동작', () => {
+  const { Auth, nav, fire } = loadAuth();
+  Auth.signIn({});
+  Auth.signIn({});
+  assert.equal(nav.length, 1, '이동 중에는 거듭 보내지 않음');
+  fire('pageshow', { persisted: false });
+  Auth.signIn({});
+  assert.equal(nav.length, 1, '보통 페이지 표시로는 풀리지 않음');
+  fire('pageshow', { persisted: true });
+  Auth.signIn({});
+  assert.equal(nav.length, 2, '메모리째 되살아나면 다시 연결 가능');
+});
+
+test('로그인: 돌아온 결과 처리 — 토큰 저장, 빠진 권한 알림, 위조 방지 값 확인', () => {
+  // 정상: 세 권한 모두
+  let env = loadAuth();
+  env.Auth.signIn({});
+  let state = JSON.parse(env.store.get('ws.authState')).state;
+  env.loc.hash = '#' + new URLSearchParams({ access_token: 'tok1', expires_in: '3599', state, scope: [SC.tasks, SC.ev, SC.ro].join(' ') });
+  let r = plain(env.Auth.handleRedirect());
+  assert.deepEqual(r, { ok: true, silent: false, missing: [] });
+  assert.equal(env.Auth.token(), 'tok1');
+  assert.equal(env.loc.hash, '', '토큰이 든 주소는 바로 지움');
+
+  // Tasks를 빼고 허용
+  env = loadAuth();
+  env.Auth.signIn({});
+  state = JSON.parse(env.store.get('ws.authState')).state;
+  env.loc.hash = '#' + new URLSearchParams({ access_token: 'tok2', expires_in: '3599', state, scope: [SC.ev, SC.ro].join(' ') });
+  r = plain(env.Auth.handleRedirect());
+  assert.deepEqual(r.missing, [SC.tasks]);
+  assert.deepEqual(plain(env.Auth.missingScopes()), [SC.tasks]);
+
+  // 예전에 캘린더 전체 권한을 받았던 경우(상위 권한)는 빠진 것으로 보지 않음
+  env = loadAuth();
+  env.Auth.signIn({});
+  state = JSON.parse(env.store.get('ws.authState')).state;
+  env.loc.hash = '#' + new URLSearchParams({ access_token: 'tok3', expires_in: '3599', state, scope: [SC.calFull, SC.tasks].join(' ') });
+  assert.deepEqual(plain(env.Auth.handleRedirect()).missing, []);
+
+  // 위조 방지 값이 다르면 토큰을 받지 않음
+  env = loadAuth();
+  env.Auth.signIn({});
+  env.loc.hash = '#' + new URLSearchParams({ access_token: 'evil', expires_in: '3599', state: 'other' });
+  assert.equal(plain(env.Auth.handleRedirect()).error, 'state_mismatch');
+  assert.equal(env.Auth.token(), '');
+
+  // 조용한 재연결 실패
+  env = loadAuth({ storage: [['ws.auth', JSON.stringify({ granted: true, hint: 'me@example.com' })]] });
+  env.Auth.signIn({ silent: true });
+  state = JSON.parse(env.store.get('ws.authState')).state;
+  env.loc.hash = '#' + new URLSearchParams({ error: 'interaction_required', state });
+  eq(env.Auth.handleRedirect(), { error: 'interaction_required', silent: true });
+});
+
+test('서비스 워커: 빠르면 새 파일, 느리면(제한 시간 넘김) 저장해 둔 파일, 끊기면 저장해 둔 파일', async () => {
+  const APP = 'https://moontur.github.io/schedule/app.js';
+  // 빠른 네트워크 → 새 파일, 그리고 저장됨
+  let sw = loadSw(() => later(5, new Response('new')));
+  let r = await sw.get(APP);
+  assert.equal(r.body, 'new');
+  await r.settle();
+  assert.equal(sw.cache.get('https://moontur.github.io/schedule/app.js'), 'new');
+
+  // 약한 신호(400ms) + 저장해 둔 것 있음 → 제한 시간(60ms) 뒤 저장해 둔 것, 늦게 온 새 파일은 저장
+  sw = loadSw(() => later(400, new Response('fresh')));
+  sw.cache.set('https://moontur.github.io/schedule/app.js', 'old');
+  r = await sw.get(APP);
+  assert.equal(r.body, 'old');
+  assert.ok(r.ms < 300, '제한 시간 안에 응답: ' + r.ms + 'ms');
+  await r.settle();
+  assert.equal(sw.cache.get('https://moontur.github.io/schedule/app.js'), 'fresh');
+
+  // 약한 신호 + 저장해 둔 것 없음(처음 설치) → 새 파일을 기다림
+  sw = loadSw(() => later(200, new Response('first')));
+  r = await sw.get(APP);
+  assert.equal(r.body, 'first');
+
+  // 인터넷 끊김 → 저장해 둔 것
+  sw = loadSw(() => later(5, null, true));
+  sw.cache.set('https://moontur.github.io/schedule/app.js', 'old');
+  r = await sw.get(APP + '?v=2');
+  assert.equal(r.body, 'old');
+
+  // 구글 API(다른 주소)는 건드리지 않음
+  sw = loadSw(() => { throw new Error('호출되면 안 됨'); });
+  r = await sw.get('https://tasks.googleapis.com/tasks/v1/users/@me/lists');
+  assert.equal(r.res, null);
 });

@@ -61,8 +61,20 @@
     a.granted = true;
     a.silentFailedAt = 0;
     write(a);
-    return { ok: true, silent: !!saved.silent };
+    // 구글 권한 화면에서 항목을 빼고 허용했을 수 있음 → 빠진 권한을 알려 줌
+    return { ok: true, silent: !!saved.silent, missing: missingFrom(a.scope) };
   }
+
+  const CAL_FULL = 'https://www.googleapis.com/auth/calendar';
+  /** 허용된 권한 목록에서 빠진 필수 권한. 목록을 모르면(빈 값) 판단하지 않음 — API의 403으로 다시 확인 */
+  function missingFrom(scopeStr) {
+    const got = String(scopeStr || '').split(/\s+/).filter(Boolean);
+    if (!got.length) return [];
+    return SCOPES.filter((s) => got.indexOf(s) < 0 && !(got.indexOf(CAL_FULL) >= 0 && /\/auth\/calendar\./.test(s)));
+  }
+
+  /** 지금 토큰에서 빠진 필수 권한 */
+  function missingScopes() { return missingFrom(read().scope); }
 
   /** 쓸 수 있는 토큰 (없거나 만료면 '') */
   function token() {
@@ -100,10 +112,17 @@
     if (email && a.hint !== email) { a.hint = email; write(a); }
   }
 
+  // 구글로 이동하는 중이면 같은 요청을 거듭 보내지 않음.
+  // 구글 화면에서 뒤로 가기로 돌아와 페이지가 메모리째 되살아나면(pageshow persisted) 다시 풀어 줌.
   let leaving = false;
+  if (typeof root.addEventListener === 'function') {
+    root.addEventListener('pageshow', (e) => { if (e && e.persisted) leaving = false; });
+  }
+
   /**
    * 구글 로그인 화면으로 이동합니다.
-   * opts.silent: 이미 허용했으면 화면 없이 바로 돌아옴 / opts.switchAccount: 다른 계정 고르기
+   * opts.silent: 이미 허용했으면 화면 없이 바로 돌아옴 (방문 기록을 남기지 않음)
+   * opts.switchAccount: 다른 계정 고르기 / opts.consent: 권한 화면을 다시 보여 줌(빠진 권한 허용)
    */
   function signIn(opts) {
     opts = opts || {};
@@ -124,10 +143,14 @@
     });
     const h = hint();
     if (opts.silent) params.set('prompt', 'none');
+    else if (opts.consent) params.set('prompt', h && !opts.switchAccount ? 'consent' : 'select_account consent');
     else if (opts.switchAccount || !h) params.set('prompt', 'select_account');
     if (h && !opts.switchAccount) params.set('login_hint', h);
     leaving = true;
-    location.assign(AUTH_URL + '?' + params.toString());
+    const url = AUTH_URL + '?' + params.toString();
+    // 조용한 재연결은 지금 기록을 바꿔치기: 다녀와도 뒤로 가기 기록이 쌓이지 않음
+    if (opts.silent) location.replace(url);
+    else location.assign(url);
   }
 
   /** 연결 끊기: 구글에 토큰 취소를 알리고 이 기기의 연결 정보를 지웁니다. */
@@ -143,6 +166,7 @@
   root.Auth = {
     SCOPES: SCOPES,
     handleRedirect: handleRedirect,
+    missingScopes: missingScopes,
     token: token,
     msLeft: msLeft,
     clearToken: clearToken,
