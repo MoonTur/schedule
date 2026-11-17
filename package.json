@@ -4,6 +4,7 @@
   "description": "구글 캘린더 + Google Tasks를 한 화면에서 보는 설치형 웹앱 (개발용 스크립트)",
   "scripts": {
     "test": "node --test dev/test.mjs",
+    "stamp": "node dev/stamp.mjs",
     "preview": "node dev/build-preview.mjs",
     "shots": "node dev/build-preview.mjs && node dev/shoot.mjs dev/shots"
   }

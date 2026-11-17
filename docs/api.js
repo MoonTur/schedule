@@ -9,6 +9,8 @@
   const CAL = 'https://www.googleapis.com/calendar/v3';
   const TASKS = 'https://tasks.googleapis.com/tasks/v1';
   const NOTES_LIMIT = 8192;
+  const DESC_MAX = 4000;        // 화면에 싣는 일정 설명 길이
+  const DONE_DAYS = 365;        // 완료한 할 일은 최근 1년만 받음
   const MEMO_HEADER = /^\[\d{4}-\d{2}-\d{2}\][ \t]?/;
   const YMD = /^\d{4}-\d{2}-\d{2}$/;
   const HM = /^([01]\d|2[0-3]):[0-5]\d$/;
@@ -166,6 +168,20 @@
     return [].concat.apply([], lists);
   }
 
+  /**
+   * 이 앱에서 고치면 잃는 것이 있는 설명인가: 너무 길거나(화면에는 앞부분만 실음),
+   * 줄바꿈과 '주소가 그대로 보이는 링크' 말고 다른 서식(굵게, 목록, 글자와 주소가 다른 링크 등)이 있음.
+   * 이런 설명은 수정 창에서 고칠 수 없게 하고 구글 캘린더에서 고치도록 안내합니다.
+   */
+  function descLocked(desc) {
+    const s = String(desc || '');
+    if (s.length > DESC_MAX) return true;
+    const unesc = (x) => x.replace(/&amp;/g, '&').trim();
+    const rest = s.replace(/<br\s*\/?>/gi, '')
+      .replace(/<a\s+href="([^"]*)"[^>]*>([^<]*)<\/a>/gi, (m, href, text) => (unesc(href) === unesc(text) ? '' : m));
+    return /<\/?[a-z][^>]*>/i.test(rest);
+  }
+
   function toEvent(ev, cal, palette) {
     const allDay = !!(ev.start && ev.start.date);
     return {
@@ -176,7 +192,8 @@
       start: allDay ? ev.start.date : ev.start.dateTime,
       end: allDay ? ev.end.date : ev.end.dateTime,
       location: ev.location || '',
-      description: String(ev.description || '').slice(0, 4000),
+      description: String(ev.description || '').slice(0, DESC_MAX),
+      descLocked: descLocked(ev.description),
       recurring: !!ev.recurringEventId,
       link: ev.htmlLink || '',
       color: (ev.colorId && palette[ev.colorId]) || cal.color,
@@ -255,12 +272,24 @@
     return listTasks(checkId(listId));
   }
 
+  /**
+   * 남은 할 일은 모두, 완료한 할 일은 최근 1년만 받습니다 (완료한 것이 쌓여도 동기화가 느려지지 않게).
+   * 휴대폰 Tasks 앱에서 완료한 할 일은 hidden으로 표시되므로 showHidden도 켭니다.
+   * 두 요청에 같은 할 일이 겹쳐 와도 한 번만 씁니다.
+   */
   async function listTasks(listId) {
-    // 휴대폰 Tasks 앱에서 완료한 할 일은 hidden으로 표시되므로 showHidden도 켭니다.
-    const items = await listAll(TASKS + '/lists/' + enc(listId) + '/tasks', {
-      showCompleted: 'true', showHidden: 'true', maxResults: 100,
-    });
-    return items.filter((t) => !t.deleted).map(toTask);
+    const url = TASKS + '/lists/' + enc(listId) + '/tasks';
+    const since = new Date(Date.now() - DONE_DAYS * 86400000).toISOString();
+    const lists = await Promise.all([
+      listAll(url, { showCompleted: 'false', maxResults: 100 }),
+      listAll(url, { showCompleted: 'true', showHidden: 'true', completedMin: since, maxResults: 100 }),
+    ]);
+    const seen = {};
+    return lists[0].concat(lists[1]).filter((t) => {
+      if (t.deleted || seen[t.id]) return false;
+      seen[t.id] = true;
+      return true;
+    }).map(toTask);
   }
 
   function toTask(t) {
@@ -412,5 +441,6 @@
     replaceNotes: replaceNotes,
     deleteTask: deleteTask,
     _insertMemoEntry: insertMemoEntry,
+    _descLocked: descLocked,
   };
 })(typeof window !== 'undefined' ? window : globalThis);

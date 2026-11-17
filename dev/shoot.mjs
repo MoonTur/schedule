@@ -121,8 +121,12 @@ async function typeInto(sel, text) {
   await send('Input.insertText', { text });
 }
 
-/** 포커스를 옮기지 않고 동기화 시작 (자동 동기화 흉내) */
+/** 포커스를 옮기지 않고 새로고침 버튼으로 동기화 시작 (입력 중 동기화 흉내. 실패하면 알림이 뜨는 '직접 누름'으로 처리됨) */
 const backgroundSync = () => evaluate(`document.querySelector('[data-act="refresh"]').click(), true`);
+/** 브라우저의 인터넷 끊김 흉내 (navigator.onLine도 바뀜) */
+const offline = (on) => send('Network.emulateNetworkConditions', { offline: on, latency: 0, downloadThroughput: -1, uploadThroughput: -1 });
+/** 구글 로그인 화면으로 실제로 넘어가지 않고, 넘어가려 한 기록만 남김 */
+const stubSignIn = () => evaluate('(() => { window.__signIn = []; window.Auth.signIn = (o) => { window.__signIn.push(o || {}); }; return true; })()');
 
 /**
  * 구글 응답 시간을 바꿈. 요청은 부르는 즉시 처리(그 순간의 구글 상태)하고, 응답만 늦게 전달 →
@@ -461,6 +465,72 @@ async function run() {
   await open(...FOLDED, '?fail=500');
   check('불러오기 실패 화면: 다시 시도 + 다시 연결 버튼', (await evaluate('!!document.querySelector("main [data-act=retry]") && !!document.querySelector("main [data-act=connect]")')));
   await shot('45-folded-load-error');
+
+  /* ---------- 전체 검토 수정: 인터넷 끊김(1·3번), 일정 설명(2번), 다시 받기 실패(6번) ---------- */
+  console.log('[인터넷 끊김·일정 설명·다시 받기 실패]');
+  await send('Network.enable');
+
+  // 1번: 토큰이 끝난 채 인터넷 없이 열기 → 구글로 넘어가지 않고 저장해 둔 데이터 + '오프라인'
+  await open(...UNFOLDED); // 온라인으로 한 번 열어 기기 저장본을 남김
+  await offline(true);
+  await send('Page.navigate', { url: URL_ + '?expired' }); await sleep(1300);
+  check('1번: 끊긴 채 토큰이 끝나도 앱에 머묾 (크롬 오류 화면으로 안 넘어감)', (await evaluate('location.protocol')) === 'file:');
+  check('1번: 저장해 둔 할 일을 보여 주고 "오프라인" 표시', (await text()).includes('출장비 영수증 제출') && (await evaluate('document.getElementById("syncText").textContent')) === '오프라인');
+  check('1번: 다시 연결 안내 띠는 띄우지 않음', await evaluate('document.getElementById("authBanner").hidden'));
+  await shot('71-unfolded-offline-expired');
+  await stubSignIn();
+  await offline(false); await sleep(400);
+  if (!(await evaluate('window.__signIn.length'))) await evaluate('window.dispatchEvent(new Event("online")), true');
+  await sleep(600);
+  check('1번: 인터넷이 돌아오면 그때 조용히 다시 연결', await evaluate('window.__signIn.length >= 1 && window.__signIn[0].silent === true'));
+
+  // 1번: 와이파이는 잡혔지만 구글에 닿지 않음 → 짧게 확인하고 머묾
+  await send('Page.navigate', { url: URL_ + '?expired&unreachable' }); await sleep(1500);
+  check('1번: 구글에 닿지 않으면 앱에 머물고 "오프라인"', (await evaluate('location.protocol')) === 'file:' &&
+    (await evaluate('document.getElementById("syncText").textContent')) === '오프라인' && (await text()).includes('출장비 영수증 제출'));
+  await stubSignIn();
+  await evaluate('window.__fakeFetch.unreachable = false, window.dispatchEvent(new Event("online")), true'); await sleep(800);
+  check('1번: 구글에 닿으면 조용히 다시 연결', await evaluate('window.__signIn.length === 1'));
+
+  // 3번: 자동으로 다시 불러오다 실패하면 알림 없이 표시만, 새로고침을 직접 누르면 알림
+  await open(...UNFOLDED);
+  await evaluate('window.__fakeFetch.unreachable = true, window.dispatchEvent(new Event("online")), true'); await sleep(900);
+  check('3번: 자동으로 불러오다 실패 → 알림 없이 "오프라인" 표시', !(await evaluate('document.getElementById("toast").classList.contains("show")')) &&
+    (await evaluate('document.getElementById("syncText").textContent')) === '오프라인');
+  await backgroundSync(); await sleep(900);
+  check('3번: 새로고침을 직접 누르면 실패 알림', (await evaluate('document.getElementById("toast").innerText')).includes('불러오지 못했습니다'));
+  await evaluate('window.__fakeFetch.unreachable = false, true');
+  await backgroundSync(); await sleep(900);
+  check('3번: 다시 닿으면 "구글과 동기화됨"', (await evaluate('document.getElementById("syncText").textContent')).startsWith('구글과 동기화됨'));
+
+  // 2번: 서식 있는 설명은 수정 창에서 읽기만, 제목을 고쳐도 구글의 원래 설명은 그대로
+  await click('.tab[data-view="calendar"]'); await sleep(300);
+  await click('[data-act="open-event"][data-id="e-advice"]'); await sleep(250);
+  await click('[data-act="edit-event"]'); await sleep(250);
+  check('2번: 서식 있는 설명은 읽기만 + 안내', (await evaluate('document.querySelector("#sheet textarea[name=description]").readOnly')) &&
+    (await evaluate('!!document.querySelector("#sheet .desc-locked")')));
+  await shot('72-unfolded-event-desc-locked');
+  await fill('#sheet input[name="title"]', '자문회의 (장소 변경)');
+  await submit('#sheet form'); await sleep(1200);
+  check('2번: 제목을 고쳐도 원래 설명(서식 포함)은 그대로', await evaluate(`(() => { const e = __fake.data.events["me@example.com"].find(x => x.id === "e-advice");
+    return e.summary === "자문회의 (장소 변경)" && e.description === "<p>자문위원 3명 참석</p><br>자료: 3장 초안"; })()`));
+  await click('[data-act="new-event"]'); await sleep(250);
+  check('2번: 새 일정의 설명은 그대로 쓸 수 있음', !(await evaluate('document.querySelector("#sheet textarea[name=description]").readOnly')));
+  await click('#sheet [data-act="close-sheet"]'); await sleep(200);
+
+  // 6번: 일정을 지운 뒤 다시 받기가 실패해도 다른 일정은 그대로, 지운 일정은 바로 빠짐
+  await open(...UNFOLDED);
+  await evaluate(`(() => { window.GoogleApi.getEvents = async () => { throw new window.GoogleApi.ApiError(0, '인터넷에 연결되어 있지 않습니다.'); }; return true; })()`);
+  await click('[data-act="open-event"][data-id="e-dinner"]'); await sleep(250);
+  await click('[data-act="edit-event"]'); await sleep(250);
+  await click('#sheet [data-act="delete-event"]'); await sleep(250);
+  await click('#confirmDlg button[value="yes"]'); await sleep(1200);
+  const evIds = await evaluate('[...document.querySelectorAll(".today .ev-row")].map(e => e.dataset.id)');
+  check('6번: 지운 일정은 바로 빠지고 나머지 일정은 그대로 (다시 받기 실패)', evIds.length === 3 && !evIds.includes('e-dinner'), evIds.join(','));
+  check('6번: 기기 저장본의 일정도 비지 않음', (await evaluate('JSON.parse(localStorage.getItem("ws.cache")).events.length')) > 0);
+
+  // 7번: 보안 정책(CSP)에 막힌 것이 없음 (막히면 콘솔 오류로도 남음)
+  check('7번: 보안 정책에 막힌 것 없음', (await evaluate('window.__csp.length')) === 0, await evaluate('window.__csp.join(" | ")'));
 
   /* ---------- 큰 펼친 화면 ---------- */
   await open(884, 1104);

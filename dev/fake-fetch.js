@@ -16,6 +16,7 @@
       validToken: opts.validToken || null, // 정해 두면 그 토큰만 통과 (401 시험용)
       calls: [],
       failNext: null,                       // { status, message } 다음 요청 하나를 실패시킴
+      unreachable: false,                   // true면 구글에 닿지 않음 (와이파이는 잡혔지만 인터넷이 안 되는 상황)
     };
     const realFetch = target.fetch ? target.fetch.bind(target) : null;
 
@@ -35,7 +36,7 @@
       ['DELETE', EV, (m) => { g.Calendar.Events.remove(d(m[1]), d(m[2])); }],
       ['GET', /^\/tasks\/v1\/users\/@me\/lists$/, (m, q) => g.Tasks.Tasklists.list({ maxResults: num(q.maxResults), pageToken: q.pageToken })],
       ['GET', /^\/tasks\/v1\/lists\/([^/]+)\/tasks$/, (m, q) => g.Tasks.Tasks.list(d(m[1]), {
-        showCompleted: q.showCompleted !== 'false', showHidden: q.showHidden === 'true', maxResults: num(q.maxResults), pageToken: q.pageToken,
+        showCompleted: q.showCompleted !== 'false', showHidden: q.showHidden === 'true', completedMin: q.completedMin, maxResults: num(q.maxResults), pageToken: q.pageToken,
       })],
       ['POST', /^\/tasks\/v1\/lists\/([^/]+)\/tasks$/, (m, q, b) => g.Tasks.Tasks.insert(b, d(m[1]), { parent: q.parent, previous: q.previous })],
       ['GET', TK, (m) => g.Tasks.Tasks.get(d(m[1]), d(m[2]))],
@@ -59,6 +60,7 @@
       const method = (init.method || 'GET').toUpperCase();
       const q = Object.fromEntries(url.searchParams.entries());
       state.calls.push(method + ' ' + url.pathname);
+      if (state.unreachable) { await sleep(state.delay || 0); throw new TypeError('Failed to fetch'); }
 
       let res;
       const headers = init.headers || {};

@@ -8,6 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
+import { stampHtml, readDoc } from './stamp.mjs';
 
 const read = (p) => readFileSync(new URL('../' + p, import.meta.url), 'utf8');
 const plain = (o) => JSON.parse(JSON.stringify(o));
@@ -50,19 +51,26 @@ const SC = {
   calFull: 'https://www.googleapis.com/auth/calendar',
 };
 
-/** docs/sw.js + 가짜 서비스 워커 환경 */
+/** docs/sw.js + 가짜 서비스 워커 환경 (저장소는 주소 전체 → 내용) */
 function loadSw(fetchImpl) {
   const handlers = {};
   const cache = new Map();
-  const keyOf = (req, ignoreSearch) => {
-    const u = new URL(typeof req === 'string' ? req : req.url, 'https://moontur.github.io/schedule/');
-    return ignoreSearch ? u.origin + u.pathname : u.href;
+  const href = (req) => new URL(typeof req === 'string' ? req : req.url, 'https://moontur.github.io/schedule/').href;
+  const path = (h) => { const u = new URL(h); return u.origin + u.pathname; };
+  const match = async (req, o) => {
+    const h = href(req);
+    const k = o && o.ignoreSearch ? [...cache.keys()].find((x) => path(x) === path(h)) : (cache.has(h) ? h : undefined);
+    return k === undefined ? undefined : new Response(cache.get(k));
   };
-  const caches = {
-    open: async () => ({ put: async (req, res) => { cache.set(keyOf(req, true), await res.text()); }, addAll: async () => {} }),
-    match: async (req, o) => { const k = keyOf(req, o && o.ignoreSearch); return cache.has(k) ? new Response(cache.get(k)) : undefined; },
-    keys: async () => [], delete: async () => true,
+  const store = {
+    put: async (req, res) => { cache.set(href(req), await res.text()); },
+    match,
+    add: async (u) => { const res = await fetchImpl(u); if (!res.ok) throw new TypeError('bad'); cache.set(href(u), await res.text()); },
+    addAll: async () => {},
+    keys: async () => [...cache.keys()].map((url) => ({ url })),
+    delete: async (req) => cache.delete(href(req)),
   };
+  const caches = { open: async () => store, match, keys: async () => [], delete: async () => true };
   const self = {
     location: { origin: 'https://moontur.github.io' }, WS_NET_TIMEOUT: 60,
     addEventListener: (t, f) => { handlers[t] = f; }, skipWaiting: () => {}, clients: { claim: async () => {} },
@@ -408,7 +416,8 @@ test('API 연결 만료: 401이면 다시 연결을 요청하고 오류를 돌�
   const { api, net, unauthorized, setToken } = loadApi();
   setToken('expired');
   await assert.rejects(api.getTasks('L1'), (e) => e.status === 401);
-  assert.deepEqual(plain(unauthorized), [401]);
+  // 할 일은 두 요청(남은 것 + 최근 완료)을 함께 보내므로 여러 번 알릴 수 있음 (앱은 다시 연결을 한 번만 함)
+  assert.ok(unauthorized.length >= 1 && unauthorized.every((s) => s === 401), String(unauthorized));
   const before = net.calls.length;
   setToken('');
   await assert.rejects(api.getTasks('L1'), (e) => e.status === 401);
@@ -545,4 +554,91 @@ test('서비스 워커: 빠르면 새 파일, 느리면(제한 시간 넘김) �
   sw = loadSw(() => { throw new Error('호출되면 안 됨'); });
   r = await sw.get('https://tasks.googleapis.com/tasks/v1/users/@me/lists');
   assert.equal(r.res, null);
+});
+
+/* ================= 전체 검토 수정 (2026-11-17) ================= */
+
+test('검토 5번 서비스 워커: 약한 신호에서 다른 버전 저장본은 쓰지 않고 새 파일을 기다림 (파일이 섞이지 않게)', async () => {
+  const BASE = 'https://moontur.github.io/schedule/';
+  // 저장본은 옛 버전(v=1)뿐, 화면은 새 버전(v=2)을 부름 → 제한 시간이 지나도 옛 파일을 주지 않음
+  let sw = loadSw(() => later(200, new Response('js2')));
+  sw.cache.set(BASE + 'app.js?v=1', 'js1');
+  let r = await sw.get(BASE + 'app.js?v=2');
+  assert.equal(r.body, 'js2');
+
+  // 같은 버전 저장본이 있으면 약한 신호에서 바로 그것
+  sw = loadSw(() => later(400, new Response('js2-new')));
+  sw.cache.set(BASE + 'app.js?v=2', 'js2');
+  r = await sw.get(BASE + 'app.js?v=2');
+  assert.equal(r.body, 'js2');
+  assert.ok(r.ms < 300, '제한 시간 안에 응답: ' + r.ms + 'ms');
+
+  // 아예 끊겼으면 버전이 달라도 저장본 (아무것도 없는 것보다 나음)
+  sw = loadSw(() => later(5, null, true));
+  sw.cache.set(BASE + 'app.js?v=1', 'js1');
+  r = await sw.get(BASE + 'app.js?v=2');
+  assert.equal(r.body, 'js1');
+});
+
+test('검토 5번 서비스 워커: 새 화면(index.html)을 받으면 그 버전 파일을 미리 받고 옛 버전은 지움', async () => {
+  const BASE = 'https://moontur.github.io/schedule/';
+  const page = '<link rel="stylesheet" href="styles.css?v=c2"><script src="app.js?v=a2"></script><link rel="manifest" href="manifest.webmanifest">';
+  const files = { [BASE]: page, [BASE + 'app.js?v=a2']: 'js2', [BASE + 'styles.css?v=c2']: 'css2' };
+  const sw = loadSw((req) => {
+    const u = typeof req === 'string' ? req : req.url;
+    const type = u === BASE ? 'text/html; charset=utf-8' : 'text/plain';
+    return later(5, new Response(files[u], { headers: { 'content-type': type } }));
+  });
+  sw.cache.set(BASE + 'app.js?v=a1', 'js1');
+  sw.cache.set(BASE + 'logic.js?v=l1', 'logic1');
+  const r = await sw.get(BASE);
+  assert.equal(r.body, page);
+  await r.settle();
+  assert.equal(sw.cache.get(BASE + 'app.js?v=a2'), 'js2');
+  assert.equal(sw.cache.get(BASE + 'styles.css?v=c2'), 'css2');
+  assert.ok(!sw.cache.has(BASE + 'app.js?v=a1'), '옛 버전 app.js는 지움');
+  assert.equal(sw.cache.get(BASE + 'logic.js?v=l1'), 'logic1', '새 화면이 부르지 않는 파일은 그대로');
+});
+
+test('검토 5번: index.html의 파일 버전(?v=)이 지금 파일 내용과 맞음 — 틀리면 npm run stamp', () => {
+  const html = read('docs/index.html');
+  assert.equal((html.match(/\?v=\w+/g) || []).length, 6, 'css 1개 + js 5개');
+  assert.equal(stampHtml(html, readDoc), html, 'docs/의 css·js를 고쳤으면 npm run stamp 을 실행하세요');
+});
+
+test('검토 2번: 고치면 잃는 것이 있는 일정 설명은 잠금 (서식, 글자와 다른 링크, 4,000자 넘음)', () => {
+  const { api } = loadApi();
+  const lock = (s) => api._descLocked(s);
+  assert.equal(lock(''), false);
+  assert.equal(lock('그냥 글\n두 번째 줄'), false);
+  assert.equal(lock('첫 줄<br>둘째 줄<br/>셋째'), false, '줄바꿈만 있으면 글로 고쳐도 잃는 것 없음');
+  assert.equal(lock('자료: <a href="https://example.com/a?x=1&amp;y=2">https://example.com/a?x=1&amp;y=2</a>'), false, '주소가 그대로 보이는 링크');
+  assert.equal(lock('<a href="https://teams.microsoft.com/l/meetup-join/1">회의 참가</a>'), true, '글자와 주소가 다른 링크');
+  assert.equal(lock('<p>자문위원 3명 참석</p><br>자료'), true);
+  assert.equal(lock('<b>중요</b>'), true);
+  assert.equal(lock('<ul><li>하나</li></ul>'), true);
+  assert.equal(lock('가'.repeat(4001)), true, '화면에는 앞 4,000자만 실림');
+  assert.equal(lock('a < b 이고 c > d'), false, '부등호 글자는 서식이 아님');
+});
+
+test('검토 2번: 잠긴 설명의 일정은 가져올 때 표시됨', async () => {
+  const { api } = loadApi();
+  const data = plain(await api.getBootstrap(RANGE.startIso, RANGE.endIso, ''));
+  assert.equal(data.events.find((e) => e.id === 'e-advice').descLocked, true);
+  assert.equal(data.events.find((e) => e.id === 'e-dinner').descLocked, false);
+});
+
+test('검토 4번: 남은 할 일은 오래돼도 모두, 완료한 할 일은 최근 1년만 (겹치지 않게 합침)', async () => {
+  const { api, g, net } = loadApi();
+  const daysAgo = (n) => new Date(Date.now() - n * 86400000).toISOString();
+  g.data.tasks.L1.push({ id: 't-old-done', title: '2년 전 완료', status: 'completed', completed: daysAgo(400), hidden: true, position: '00000000000000000500' });
+  g.data.tasks.L1.push({ id: 't-recent-done', title: '한 달 전 완료', status: 'completed', completed: daysAgo(30), hidden: true, position: '00000000000000000501' });
+  g.data.tasks.L1.push({ id: 't-old-open', title: '오래된 남은 할 일', status: 'needsAction', due: '2024-01-05T00:00:00.000Z', position: '00000000000000000502' });
+  const before = net.calls.length;
+  const ids = plain(await api.getTasks('L1')).map((t) => t.id);
+  assert.ok(!ids.includes('t-old-done'), '1년 넘은 완료 할 일은 받지 않음');
+  assert.ok(ids.includes('t-recent-done') && ids.includes('t-abstract'), '최근 완료(휴대폰에서 완료해 숨겨진 것 포함)');
+  assert.ok(ids.includes('t-old-open'), '남은 할 일은 오래돼도 모두');
+  assert.equal(new Set(ids).size, ids.length, '같은 할 일이 두 번 들어가지 않음');
+  assert.equal(net.calls.slice(before).filter((c) => c === 'GET /tasks/v1/lists/L1/tasks').length, 2, '남은 것 + 최근 완료, 두 번');
 });

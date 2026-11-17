@@ -220,7 +220,9 @@
         list(listId, o) {
           calls.push('Tasks.list ' + listId);
           o = o || {};
-          const items = tasks[listOf(listId)].filter((t) => (o.showHidden || !t.hidden) && (o.showCompleted !== false || t.status !== 'completed'));
+          // completedMin을 주면 그 뒤에 완료한 할 일만 (완료하지 않은 할 일은 빠짐 — 앱은 따로 받아야 함)
+          const items = tasks[listOf(listId)].filter((t) => (o.showHidden || !t.hidden) && (o.showCompleted !== false || t.status !== 'completed') &&
+            (!o.completedMin || (t.status === 'completed' && (t.completed || '') >= o.completedMin)));
           return page(clone(items), o);
         },
         get(listId, id) { calls.push('Tasks.get'); return clone(findTask(listId, id)); },

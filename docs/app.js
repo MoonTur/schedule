@@ -82,6 +82,7 @@
     syncing: false,
     syncedAt: 0,
     error: '',
+    offline: false,   // 인터넷이 끊김 → 저장해 둔 데이터만 보여 주고, 연결되면 다시 불러옴
     needAuth: false,  // 구글 연결이 필요함 (처음이거나 만료 후 조용한 연결 실패)
     scopeMissing: false, // 구글 권한 화면에서 일부 항목을 빼고 허용함 → 권한 화면을 다시 띄워야 함
     renderPending: false,
@@ -120,6 +121,7 @@
     let html;
     let split = false;
     if (!state.loaded && state.scopeMissing) html = scopeScreen();
+    else if (!state.loaded && state.offline) html = offlineScreen();
     else if (!state.loaded && state.needAuth) html = connectScreen();
     else if (!state.loaded) html = state.error ? errorScreen() : '<p class="skeleton">구글 캘린더와 Tasks에서 불러오는 중…</p>';
     else if (state.view === 'today') html = renderToday();
@@ -179,6 +181,7 @@
     const btn = document.querySelector('[data-act="refresh"]');
     btn.classList.toggle('spin', state.syncing);
     if (state.syncing) { dot.className = 'sync-dot'; txt.textContent = '동기화 중…'; }
+    else if (state.offline) { dot.className = 'sync-dot err'; txt.textContent = '오프라인'; }
     else if (state.scopeMissing) { dot.className = 'sync-dot err'; txt.textContent = '권한 부족'; }
     else if (state.needAuth) { dot.className = 'sync-dot err'; txt.textContent = '구글 연결 필요'; }
     else if (state.error) { dot.className = 'sync-dot err'; txt.textContent = '연결 안 됨'; }
@@ -192,6 +195,13 @@
         <button type="button" class="btn" data-act="connect">다시 연결</button>
         <button type="button" class="btn primary" data-act="retry">다시 시도</button>
       </div></div>`;
+  }
+
+  /** 저장해 둔 데이터도 없이 인터넷이 끊긴 경우 */
+  function offlineScreen() {
+    return `<div class="skeleton"><p>인터넷에 연결되어 있지 않습니다.</p>
+      <p class="hint" style="margin:8px 0 16px">연결되면 구글 캘린더와 Tasks에서 자동으로 불러옵니다.</p>
+      <div style="display:flex;gap:8px;justify-content:center"><button type="button" class="btn primary" data-act="retry">다시 시도</button></div></div>`;
   }
 
   /** 구글 권한 화면에서 일부 항목이 빠진 경우 */
@@ -610,6 +620,8 @@
     const en = ev && !ev.allDay ? L.fmtTime(ev.end) : addHour(st);
     const calId = ev ? ev.calendarId : (writable.find((c) => c.primary) || writable[0]).id;
     const desc = ev ? L.stripHtml(ev.description) : '';
+    // 서식이 있거나 긴 설명은 여기서 고치면 원래 내용이 지워지므로 읽기만
+    const lockDesc = !!(ev && ev.descLocked);
     const lockCal = ev && ev.recurring;
     openSheet(`<form class="sh" data-form="event">
       <div class="sh-head"><h2>${ev ? '일정 수정' : '새 일정'}</h2><button type="button" class="icon-btn" data-act="close-sheet" aria-label="닫기">${ICON.x}</button></div>
@@ -626,7 +638,8 @@
         <label class="field"><span>끝</span><input type="time" name="endTime" value="${en}"></label>
       </div>
       <label class="field"><span>장소</span><input name="location" value="${esc(ev ? ev.location : '')}" autocomplete="off"></label>
-      <label class="field"><span>설명</span><textarea name="description" rows="3">${esc(desc)}</textarea></label>
+      <label class="field"><span>설명</span><textarea name="description" rows="3"${lockDesc ? ' readonly' : ''}>${esc(desc)}</textarea></label>
+      ${lockDesc ? '<p class="hint desc-locked">서식이 있거나 긴 설명이라 여기서는 고칠 수 없습니다. 설명은 구글 캘린더에서 고쳐 주세요. (다른 항목은 여기서 고쳐도 설명이 그대로 남습니다)</p>' : ''}
       <div class="sh-actions">
         ${ev ? `<button type="button" class="btn danger" data-act="delete-event">${ICON.trash}삭제</button>` : ''}
         <span class="spacer"></span>
@@ -700,19 +713,30 @@
     return true;
   }
 
-  async function loadAll() {
+  /**
+   * 구글에서 전부 다시 불러옵니다.
+   * opts.manual: 새로고침·다시 시도 버튼을 직접 누름 → 실패하면 알림.
+   * 자동으로 부를 때(돌아왔을 때, 5분마다, 인터넷 연결됨)는 실패해도 위쪽 표시만 바꿈 (끊겨 있는 동안 알림이 반복되지 않게).
+   */
+  async function loadAll(opts) {
+    const manual = !!(opts && opts.manual);
     if (state.syncing) return;
+    const prevToday = state.today;
+    state.today = todayNow(); // 끊겨 있어도 날짜가 바뀌면 '오늘'은 맞게
+    if (state.selDate === prevToday) state.selDate = state.today;
     if (!Auth.token()) { needAuth(); return; }
     if (Auth.missingScopes().length) { // 권한이 빠진 토큰으로는 부르지 않음
       state.scopeMissing = true;
       safeRender();
       return;
     }
+    if (navigator.onLine === false) { // 확실히 끊김: 요청하지 않고 저장해 둔 데이터를 보여 줌
+      setOffline(true);
+      if (manual) toast('인터넷에 연결되어 있지 않습니다.', true);
+      return;
+    }
     state.syncing = true;
     renderSync();
-    const prevToday = state.today;
-    state.today = todayNow();
-    if (state.selDate === prevToday) state.selDate = state.today;
     const key = state.today.slice(0, 7);
     const taskGen = state.taskGen;
     const eventGen = state.eventGen;
@@ -735,6 +759,7 @@
       }
       state.loaded = true;
       state.error = '';
+      state.offline = false;
       state.needAuth = false;
       state.scopeMissing = false;
       state.syncedAt = Date.now();
@@ -746,7 +771,8 @@
     } catch (e) {
       if (!isAuthError(e) && e.code !== 'scope') { // 연결 만료·권한 부족은 각자의 안내 화면으로 처리
         state.error = e.message || String(e);
-        toast('구글에서 불러오지 못했습니다: ' + state.error, true);
+        state.offline = e.status === 0; // 요청이 구글에 닿지 못함
+        if (manual) toast('구글에서 불러오지 못했습니다: ' + state.error, true);
       }
     } finally {
       state.syncing = false;
@@ -778,7 +804,9 @@
       .filter((k, i, arr) => arr.indexOf(k) === i);
     state.eventGen++;          // 진행 중이던 옛 요청(저장 전 내용)의 응답은 버림
     state.loadingMonths = {};
-    state.events = {};
+    // 다시 받는 달은 새 일정이 올 때까지 지금 일정을 그대로 보여 줌 → 다시 받기가 실패해도 일정이 사라지지 않고,
+    // 기기 저장본도 빈 목록으로 덮이지 않음. 나머지 달은 버렸다가 볼 때 다시 받음.
+    Object.keys(state.events).forEach((k) => { if (keys.indexOf(k) < 0) delete state.events[k]; });
     safeRender();
     await Promise.all(keys.map(loadMonth));
     cacheSave();
@@ -1012,7 +1040,8 @@
       timeZone: TZ,
     };
     const desc = f.description.value;
-    if (!ev || desc !== ctx.descBase) input.description = desc;
+    // 설명은 바꿨을 때만 보냄. 고칠 수 없는 설명(서식·긴 글)은 절대 보내지 않음 → 구글의 원래 설명이 그대로 남음
+    if (!ev || (!ev.descLocked && desc !== ctx.descBase)) input.description = desc;
     if (ev) { input.id = ev.id; input.originalCalendarId = ev.calendarId; }
     if (!input.title) { toast('제목을 입력해 주세요.', true); return; }
     if (!input.date) { toast('날짜를 골라 주세요.', true); return; }
@@ -1039,6 +1068,10 @@
     if (!(await confirmBox(msg))) return;
     try {
       await call('deleteEvent', ev.calendarId, ev.id);
+      // 다시 받기를 기다리지 않고 지운 일정은 바로 화면에서 뺌
+      Object.keys(state.events).forEach((k) => {
+        state.events[k] = state.events[k].filter((x) => !(x.calendarId === ev.calendarId && x.id === ev.id));
+      });
       closeSheet();
       toast('일정을 지웠습니다.');
       await reloadEvents();
@@ -1126,8 +1159,8 @@
     const d = el.dataset;
     switch (d.act) {
       case 'view': setView(d.view); break;
-      case 'refresh': loadAll(); break;
-      case 'retry': loadAll(); break;
+      case 'refresh': loadAll({ manual: true }); break;
+      case 'retry': loadAll({ manual: true }); break;
       case 'open-task': openTask(d.id); break;
       case 'back': backToList(); break;
       case 'connect': connect(false); break;
@@ -1283,16 +1316,26 @@
 
   // 다시 화면에 돌아오면 구글에서 새로 불러옵니다 (다른 앱에서 고친 내용 반영).
   // 토큰이 곧 끝나면 입력 중이 아닐 때 미리 새로 받습니다.
+  /** 토큰이 within(ms) 안에 끝나면 먼저 조용히 새로 받고, 그러지 않았으면 stale()일 때 다시 불러옴 */
+  function refreshThenSync(within, stale) {
+    if (tokenExpiringSoon(within)) {
+      trySilent().then((left) => { if (!left && stale()) loadAll(); });
+      return;
+    }
+    if (stale()) loadAll();
+  }
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState !== 'visible') return;
-    if (refreshTokenIfNeeded(10 * 60 * 1000)) return;
-    if (todayNow() !== state.today || Date.now() - state.syncedAt > 60 * 1000) loadAll();
+    refreshThenSync(10 * 60 * 1000, () => todayNow() !== state.today || Date.now() - state.syncedAt > 60 * 1000);
   });
   setInterval(() => {
     if (document.visibilityState !== 'visible') return;
-    if (refreshTokenIfNeeded(3 * 60 * 1000)) return;
-    if (Date.now() - state.syncedAt > 5 * 60 * 1000) loadAll();
+    refreshThenSync(3 * 60 * 1000, () => Date.now() - state.syncedAt > 5 * 60 * 1000);
   }, 60 * 1000);
+
+  // 인터넷이 끊기면 표시만 바꾸고, 다시 연결되면 바로 불러옴 (토큰이 끝났으면 그때 조용히 다시 연결)
+  window.addEventListener('offline', () => setOffline(true));
+  window.addEventListener('online', () => { setOffline(false); loadAll(); });
 
   // 폰의 뒤로 가기: 남겨 둔 기록에 맞춰 할 일 상세를 열고 닫음
   window.addEventListener('popstate', (e) => {
@@ -1337,6 +1380,7 @@
 
   /** 연결 버튼: 구글 화면으로 이동 (switchAccount: 다른 계정 고르기, 권한이 빠졌으면 권한 화면을 다시 띄움) */
   function connect(switchAccount) {
+    if (navigator.onLine === false) { toast('인터넷에 연결되어 있지 않습니다.', true); return; }
     closeSheet();
     saveResume();
     try {
@@ -1346,24 +1390,75 @@
     }
   }
 
+  function setOffline(v) {
+    if (state.offline === v) return;
+    state.offline = v;
+    safeRender();
+  }
+
+  /**
+   * 구글에 닿는지 짧게 확인합니다. 인터넷이 끊긴 채 구글 로그인 화면으로 넘어가면 크롬 오류 화면만 남고
+   * 저장해 둔 데이터로 돌아올 수 없으므로, 조용한 재연결 전에 꼭 확인합니다.
+   * (응답 내용은 보지 않음 — 어떤 응답이든 오면 닿는 것)
+   */
+  const PROBE_URL = 'https://www.googleapis.com/generate_204';
+  async function reachable() {
+    if (navigator.onLine === false) return false;
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), 4000);
+    try {
+      await fetch(PROBE_URL, { mode: 'no-cors', cache: 'no-store', signal: ctl.signal });
+      return true;
+    } catch (e) {
+      return false;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /**
+   * 화면 없이 구글 연결을 새로 받으러 갑니다 (구글에 다녀오는 데 몇 초).
+   * 인터넷이 안 되거나, 확인하는 사이 입력을 시작했으면 떠나지 않고 false.
+   * 여러 곳에서 한꺼번에 불러도 확인은 한 번만 합니다.
+   */
+  let silentTry = null;
+  function trySilent() {
+    if (!silentTry) {
+      silentTry = (async () => {
+        if (!Auth.canTrySilent()) return false;
+        if (!(await reachable())) { setOffline(true); return false; }
+        setOffline(false);
+        if (!safeToLeave()) return false;
+        saveResume();
+        Auth.signIn({ silent: true });
+        return true;
+      })().catch(() => false).finally(() => { silentTry = null; });
+    }
+    return silentTry;
+  }
+
   /** 토큰이 없거나 만료됨: 가능하면 화면 없이 조용히 새로 받고, 아니면 연결 버튼을 보여 줌 */
   function needAuth() {
     Auth.clearToken();
     if (Auth.canTrySilent() && safeToLeave()) {
-      saveResume();
-      try { Auth.signIn({ silent: true }); return; } catch (e) { /* 아래로 */ }
+      trySilent().then((left) => { if (!left) showNeedAuth(); });
+      return;
     }
+    showNeedAuth();
+  }
+
+  /** 다시 연결 안내를 띄움. 인터넷이 끊겨 못 간 것이면 안내 대신 '오프라인' 표시 (연결되면 다시 시도) */
+  function showNeedAuth() {
+    if (state.offline) { safeRender(); return; }
     if (!state.needAuth) {
       state.needAuth = true;
       safeRender();
     }
   }
 
-  /** 토큰이 within(ms) 안에 끝나면 미리 새로 받음. 화면을 떠났으면 true */
-  function refreshTokenIfNeeded(within) {
-    if (!Auth.token() || Auth.msLeft() > within || !Auth.canTrySilent() || !safeToLeave()) return false;
-    saveResume();
-    try { Auth.signIn({ silent: true }); return true; } catch (e) { return false; }
+  /** 토큰이 within(ms) 안에 끝나 미리 새로 받아야 하는지 */
+  function tokenExpiringSoon(within) {
+    return !!Auth.token() && Auth.msLeft() <= within && Auth.canTrySilent() && safeToLeave();
   }
 
   async function signOutAction() {
@@ -1416,9 +1511,9 @@
     render();
     loadAll();
   } else if (Auth.canTrySilent()) {
+    // 저장해 둔 데이터를 먼저 보여 주고, 인터넷이 될 때만 구글에 다녀옴
     render();
-    saveResume();
-    try { Auth.signIn({ silent: true }); } catch (e) { state.needAuth = true; render(); }
+    trySilent().then((left) => { if (!left) showNeedAuth(); });
   } else {
     state.needAuth = true;
     render();

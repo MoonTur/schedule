@@ -3,13 +3,15 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<!-- 이 앱의 파일과 구글 API만 쓰도록 제한 (만일의 스크립트 끼워 넣기 피해를 줄임) -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https://www.googleapis.com https://tasks.googleapis.com https://oauth2.googleapis.com; object-src 'none'; base-uri 'none'">
 <meta name="theme-color" content="#FFFFFF">
 <meta name="description" content="구글 캘린더 일정과 Google Tasks 할 일을 한 화면에서">
 <title>업무·일정</title>
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="icons/icon-192.png" type="image/png">
 <link rel="apple-touch-icon" href="icons/icon-192.png">
-<link rel="stylesheet" href="styles.css">
+<link rel="stylesheet" href="styles.css?v=351e5e5f3f">
 </head>
 <body>
 <div class="app" id="app">
@@ -58,10 +60,10 @@
 <dialog class="sheet confirm" id="confirmDlg" aria-label="확인"></dialog>
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
-<script src="config.js"></script>
-<script src="auth.js"></script>
-<script src="logic.js"></script>
-<script src="api.js"></script>
-<script src="app.js"></script>
+<script src="config.js?v=1c9f79d80c"></script>
+<script src="auth.js?v=be36c4b347"></script>
+<script src="logic.js?v=16c3e9b48e"></script>
+<script src="api.js?v=cc500f81fd"></script>
+<script src="app.js?v=d54ace6173"></script>
 </body>
 </html>
