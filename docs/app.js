@@ -31,6 +31,8 @@
     pin: svg(16, '<path d="M12 21s-7-6.2-7-11.5A7 7 0 0 1 19 9.5C19 14.8 12 21 12 21z"/><circle cx="12" cy="9.5" r="2.5"/>'),
     ext: svg(16, '<path d="M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/>'),
     checkSm: svg(12, '<circle cx="12" cy="12" r="9"/><path d="M8 12.5l2.5 2.5L16 9.5"/>'),
+    expand: svg(16, '<path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/>'),
+    collapse: svg(16, '<path d="M9 4v5H4M15 4v5h5M9 20v-5H4M15 20v-5h5"/>'),
   };
 
   /* ---------- 이 기기에 남기는 것 (화면 설정, 마지막으로 받은 데이터) ---------- */
@@ -68,7 +70,9 @@
     selDate: '',
     selTaskId: '',
     showDone: false,
-    showNoDate: store.get('showNoDate', false) === true,
+    // 펼친 화면의 캘린더 보기: 'split'(나눠 보기) | 'cal'(달력 크게) | 'day'(그날 크게)
+    calLayout: ['split', 'cal', 'day'].indexOf(store.get('calLayout', 'split')) >= 0 ? store.get('calLayout', 'split') : 'split',
+    dayFrom: '',      // 달력 크게 보기에서 날짜를 눌러 그날 크게 보기로 왔으면 'cal' (돌아갈 곳)
     memoEdit: false,
     memoEditBase: '',
     // 입력칸에 쓰던 글. 화면을 다시 그려도 되살립니다.
@@ -301,7 +305,8 @@
     const day = state.today;
     const evs = L.eventsOn(allEvents(), day);
     const g = L.todayTasks(state.tasks, day, 14);
-    const hasTasks = g.overdue.length + g.today.length + g.upcoming.length > 0;
+    const ahead = g.upcoming.concat(g.nodate); // 날짜 없는 할 일은 날짜 있는 할 일 아래에 이어서
+    const hasTasks = g.overdue.length + g.today.length + ahead.length > 0;
     return `<div class="today">
       <p class="today-date">${esc(L.fmtLong(day))}</p>
       <div class="today-cols">
@@ -313,21 +318,12 @@
           <div class="block-head"><h2>할 일</h2><span class="src src-task">Google Tasks · ${esc(listTitle())}</span></div>
           ${taskGroup('지난 기한', g.overdue, 'danger')}
           ${taskGroup('오늘', g.today)}
-          ${taskGroup('다가오는 마감 · 2주', g.upcoming)}
-          ${hasTasks ? '' : '<p class="empty">마감이 다가오는 할 일이 없습니다.</p>'}
-          ${noDateGroup(g.nodate)}
+          ${taskGroup('앞으로 할 일', ahead)}
+          ${hasTasks ? '' : '<p class="empty">할 일이 없습니다.</p>'}
           <form class="quick-add" data-form="quick-add">${ICON.plus}<input name="title" data-draft="quick" value="${esc(draftValue('quick'))}" placeholder="오늘 할 일 추가" aria-label="오늘 마감인 할 일 추가" autocomplete="off" enterkeyhint="done"></form>
         </section>
       </div>
     </div>`;
-  }
-
-  /** 오늘 화면 맨 아래: 마감일 없는 할 일 (접었다 폈다, 상태 기억) */
-  function noDateGroup(items) {
-    if (!items.length) return '';
-    const open = state.showNoDate;
-    return `<button type="button" class="done-toggle" data-act="toggle-nodate" aria-expanded="${open}">날짜 없음 ${items.length}${ICON.chevR}</button>` +
-      (open ? items.map(taskRow).join('') : '');
   }
 
   /* ---------- 할 일 ---------- */
@@ -446,27 +442,45 @@
 
   /* ---------- 캘린더 ---------- */
 
+  /** 지금 캘린더 보기. 접은 화면은 언제나 달력 아래에 그날이 이어지는 한 칸 보기 */
+  const calLayout = () => (isWide() ? state.calLayout : 'split');
+
+  /** 보기 바꾸기 버튼 (펼친 화면에서만) */
+  function layoutBtn(target, label) {
+    const icon = target === 'split' ? ICON.collapse : ICON.expand;
+    return `<button type="button" class="btn sm layout-btn" data-act="cal-layout" data-layout="${target}">${icon}${esc(label)}</button>`;
+  }
+
   function renderCalendar() {
-    const weeks = L.monthWeeks(state.month);
+    const layout = calLayout();
+    const wide = isWide();
     const evs = allEvents();
-    const max = isWide() ? 3 : 2;
-    const loading = !state.events[state.month];
-    const cells = weeks.map((w) => `<div class="wk">${w.map((day) => dayCell(day, evs, max)).join('')}</div>`).join('');
-    return `<div class="cal-split">
-      <div class="cal-main" data-scroll="cal">
+    const showCal = layout !== 'day';
+    const showDay = layout !== 'cal';
+    let calHtml = '';
+    if (showCal) {
+      const weeks = L.monthWeeks(state.month);
+      const max = !wide ? 2 : layout === 'cal' ? 5 : 3; // 달력을 크게 보면 날짜마다 더 많이
+      const loading = !state.events[state.month];
+      const cells = weeks.map((w) => `<div class="wk">${w.map((day) => dayCell(day, evs, max)).join('')}</div>`).join('');
+      calHtml = `<div class="cal-main" data-scroll="cal">
         <div class="cal-head">
           <button type="button" class="icon-btn" data-act="month" data-delta="-1" aria-label="이전 달">${ICON.chevL}</button>
           <h2 class="cal-title">${esc(L.monthLabel(state.month))}</h2>
           <button type="button" class="icon-btn" data-act="month" data-delta="1" aria-label="다음 달">${svg(20, '<path d="M9 5l7 7-7 7"/>')}</button>
           ${loading ? '<span class="cal-loading">불러오는 중…</span>' : ''}
-          <button type="button" class="btn sm" data-act="month-today">오늘</button>
+          <button type="button" class="btn sm today-btn" data-act="month-today">오늘</button>
+          ${wide ? (layout === 'cal' ? layoutBtn('split', '나눠 보기') : layoutBtn('cal', '크게 보기')) : ''}
         </div>
         <div class="cal-wd" aria-hidden="true">${L.WEEK.map((w, i) => `<span class="${i === 0 ? 'sun' : i === 6 ? 'sat' : ''}">${w}</span>`).join('')}</div>
         <div class="cal-grid">${cells}</div>
         <div class="cal-legend"><span><span class="lg-ev"></span>일정 (구글 캘린더)</span><span><span class="lg-task"></span>할 일 (마감일에 표시)</span><span><span class="lg-over"></span>기한 지남</span></div>
-      </div>
-      <aside class="day-panel" data-scroll="day" aria-label="고른 날짜">${renderDayPanel(state.selDate, evs)}</aside>
-    </div>`;
+      </div>`;
+    }
+    const dayHtml = showDay
+      ? `<aside class="day-panel" data-scroll="day" aria-label="고른 날짜">${renderDayPanel(state.selDate, evs, layout, wide)}</aside>`
+      : '';
+    return `<div class="cal-split layout-${layout}">${calHtml}${dayHtml}</div>`;
   }
 
   function dayCell(day, evs, max) {
@@ -490,11 +504,29 @@
     </button>`;
   }
 
-  function renderDayPanel(day, evs) {
+  function renderDayPanel(day, evs, layout, wide) {
     const dayEvs = L.eventsOn(evs, day);
     const dayTasks = L.tasksDueOn(state.tasks, day);
     const overdue = day === state.today ? L.todayTasks(state.tasks, day).overdue : [];
-    return `<div class="dp-head"><h2>${esc(L.fmtLong(day))}</h2>${day === state.today ? '<span class="badge">오늘</span>' : ''}</div>
+    const badge = day === state.today ? '<span class="badge">오늘</span>' : '';
+    let head;
+    if (layout === 'day') {
+      // 그날 크게 보기: 달력이 없으므로 전날·다음 날로 넘기고, 온 곳(달력 크게 / 나눠 보기)으로 돌아감
+      head = `<div class="dp-head">
+        <div class="dp-nav">
+          <button type="button" class="icon-btn sm" data-act="day-shift" data-delta="-1" aria-label="전날">${ICON.chevL}</button>
+          <h2>${esc(L.fmtLong(day))}</h2>
+          <button type="button" class="icon-btn sm" data-act="day-shift" data-delta="1" aria-label="다음 날">${svg(20, '<path d="M9 5l7 7-7 7"/>')}</button>
+          ${badge}
+        </div>
+        ${state.dayFrom === 'cal'
+          ? `<button type="button" class="btn sm layout-btn" data-act="cal-layout" data-layout="cal">${ICON.chevL}달력</button>`
+          : layoutBtn('split', '나눠 보기')}
+      </div>`;
+    } else {
+      head = `<div class="dp-head"><div class="dp-nav"><h2>${esc(L.fmtLong(day))}</h2>${badge}</div>${wide ? layoutBtn('day', '크게 보기') : ''}</div>`;
+    }
+    return `${head}
       <section>
         <div class="block-head"><h3>일정</h3><span class="src src-ev">구글 캘린더</span></div>
         ${dayEvs.length ? dayEvs.map((ev) => eventRow(ev, day)).join('') : '<p class="empty">일정이 없습니다.</p>'}
@@ -1054,11 +1086,25 @@
   function pickDay(day) {
     state.selDate = day;
     if (day.slice(0, 7) !== state.month) { state.month = day.slice(0, 7); ensureMonth(); }
+    // 달력 크게 보기에서 날짜를 누르면 그날을 크게 보여 줌 ('← 달력'으로 돌아옴, 저장하지 않음)
+    if (isWide() && state.calLayout === 'cal') {
+      state.calLayout = 'day';
+      state.dayFrom = 'cal';
+    }
     render();
     if (!isWide()) {
       const panel = main.querySelector('.day-panel');
       if (panel) panel.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
     }
+  }
+
+  /** 펼친 화면 캘린더 보기 바꾸기 (나눠 보기 / 달력 크게 / 그날 크게). 고른 보기는 기억함 */
+  function setCalLayout(layout) {
+    if (['split', 'cal', 'day'].indexOf(layout) < 0) return;
+    state.calLayout = layout;
+    state.dayFrom = '';
+    store.set('calLayout', layout);
+    render();
   }
 
   function changeMonth(delta) {
@@ -1085,11 +1131,8 @@
       case 'account': openAccountSheet(); break;
       case 'sign-out': signOutAction(); break;
       case 'toggle-done': state.showDone = !state.showDone; render(); break;
-      case 'toggle-nodate':
-        state.showNoDate = !state.showNoDate;
-        store.set('showNoDate', state.showNoDate);
-        render();
-        break;
+      case 'cal-layout': setCalLayout(d.layout); break;
+      case 'day-shift': pickDay(L.addDays(state.selDate, +d.delta)); break;
       case 'new-task': openTaskForm(d.date || ''); break;
       case 'clear-due': updateDue(d.id, ''); break;
       case 'delete-task': deleteTaskAction(d.id); break;

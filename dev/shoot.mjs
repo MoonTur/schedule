@@ -156,20 +156,19 @@ async function run() {
   check('오늘: 일정 4개 (숨긴 캘린더·취소 일정 제외)', (await evaluate('document.querySelectorAll(".today .ev-row").length')) === 4);
   check('오늘: 지난 기한에 출장비 영수증', (await text()).includes('출장비 영수증 제출'));
 
-  // 날짜 없음 묶음: 처음엔 접힘 → 누르면 펼침 → 다시 열어도 펼친 상태 기억
-  check('오늘: 날짜 없음 묶음은 처음에 접혀 있음', !(await text()).includes('명함 주문') &&
-    (await evaluate('document.querySelector("[data-act=toggle-nodate]").textContent.trim()')) === '날짜 없음 1');
-  await click('[data-act="toggle-nodate"]'); await sleep(200);
-  check('오늘: 누르면 날짜 없는 할 일이 보임', (await text()).includes('명함 주문'));
+  // 날짜 없는 할 일: 따로 묶지 않고 할 일 목록에 이어서, 날짜 있는 할 일보다 아래
+  const todayOrder = () => evaluate('[...document.querySelectorAll(".today input[data-act=toggle]")].map(i => i.dataset.id)');
+  let order = await todayOrder();
+  check('오늘: 날짜 없는 할 일도 목록에 바로 보임 (따로 묶지 않음)', order.includes('t-card') && !(await evaluate('!!document.querySelector("[data-act=toggle-nodate]")')));
+  check('오늘: 날짜 없는 할 일은 날짜 있는 할 일 아래', order[order.length - 1] === 't-card' && order.indexOf('t-budget') < order.indexOf('t-card'), order.join(','));
+  check('오늘: 마지막 묶음 이름은 "앞으로 할 일"', (await evaluate('[...document.querySelectorAll(".today .g-label")].map(e => e.textContent.trim()).join(",")')) === '지난 기한,오늘,앞으로 할 일');
   await evaluate('document.getElementById("main").scrollTop = 99999, true'); await sleep(150);
   await shot('01b-folded-today-nodate');
-  await send('Page.reload', {}); await sleep(1300);
-  check('오늘: 다시 열어도 펼친 상태 기억', (await text()).includes('명함 주문'));
   await click('input[data-act="toggle"][data-id="t-card"]'); await sleep(700);
   check('오늘: 날짜 없는 할 일도 체크하면 구글에 완료', (await evaluate('__fake.data.tasks.L1.find(t => t.id === "t-card").status')) === 'completed');
-  check('오늘: 완료하면 날짜 없음 묶음이 사라짐', !(await evaluate('!!document.querySelector("[data-act=toggle-nodate]")')));
+  check('오늘: 완료하면 목록에서 빠짐', !(await todayOrder()).includes('t-card'));
   await click('.toast-btn'); await sleep(700);
-  check('오늘: 되돌리면 날짜 없음 묶음에 다시 보임', (await text()).includes('명함 주문'));
+  check('오늘: 되돌리면 다시 맨 아래에', (await todayOrder()).slice(-1)[0] === 't-card');
 
   await click('.bn[data-view="tasks"]'); await sleep(250);
   await shot('02-folded-tasks');
@@ -349,6 +348,47 @@ async function run() {
   await fill('#sheet input[name="endTime"]', '10:00');
   await submit('#sheet form'); await sleep(1800);
   check('2번: 달 넘긴 직후 저장한 일정이 보임', (await evaluate('document.querySelector(".day-panel").innerText')).includes('달 넘긴 직후 일정'));
+
+  /* ---------- 캘린더 크게 보기 (펼친 화면) ---------- */
+  console.log('[캘린더 크게 보기]');
+  const panes = () => evaluate('({ cal: !!document.querySelector(".cal-main"), day: !!document.querySelector(".day-panel"), title: (document.querySelector(".dp-head h2") || {}).textContent || "" })');
+  await open(...UNFOLDED);
+  await click('.tab[data-view="calendar"]'); await sleep(300);
+  let p = await panes();
+  check('나눠 보기(기본): 달력과 그날이 함께', p.cal && p.day);
+  await click('.cal-head [data-act="cal-layout"][data-layout="cal"]'); await sleep(250);
+  p = await panes();
+  check('달력 크게: 그날 칸이 사라지고 달력만', p.cal && !p.day);
+  check('달력 크게: 날짜 칸이 커지고 항목을 더 보여 줌', (await evaluate('document.querySelector(".day.today").getBoundingClientRect().height')) >= 120 &&
+    (await evaluate('document.querySelector(".day.today").querySelectorAll(".chip").length')) > 3);
+  await shot('51-unfolded-cal-full');
+  const target = await evaluate('[...document.querySelectorAll(".day:not(.other)")].map(d => d.dataset.date).find(d => d.endsWith("-20"))');
+  await click(`.day[data-date="${target}"]`); await sleep(250);
+  p = await panes();
+  check('달력 크게 → 날짜 누름: 그날을 크게, 고른 날짜로', !p.cal && p.day && p.title.includes('20일'));
+  await shot('52-unfolded-day-full');
+  check('그날 크게(달력에서 옴): "달력"으로 돌아가는 버튼', (await evaluate('document.querySelector(".dp-head [data-act=cal-layout]").dataset.layout')) === 'cal');
+  await click('.dp-head [data-act="day-shift"][data-delta="1"]'); await sleep(250);
+  check('그날 크게: 다음 날로 넘기기', (await panes()).title.includes('21일'));
+  await click('.dp-head [data-act="cal-layout"]'); await sleep(250);
+  p = await panes();
+  check('"달력"을 누르면 달력 크게 보기로 돌아옴', p.cal && !p.day);
+  await send('Page.reload', {}); await sleep(1300);
+  await click('.tab[data-view="calendar"]'); await sleep(300);
+  p = await panes();
+  check('다시 열어도 고른 보기(달력 크게) 기억', p.cal && !p.day);
+  await click('.cal-head [data-act="cal-layout"][data-layout="split"]'); await sleep(250);
+  p = await panes();
+  check('나눠 보기로 돌아옴', p.cal && p.day);
+  await click('.dp-head [data-act="cal-layout"][data-layout="day"]'); await sleep(250);
+  p = await panes();
+  check('나눠 보기 → 그날 크게', !p.cal && p.day && (await evaluate('document.querySelector(".dp-head [data-act=cal-layout]").dataset.layout')) === 'split');
+  await size(...FOLDED); await sleep(400);
+  p = await panes();
+  check('접으면: 크게 보기 버튼 없이 달력 아래 그날', p.cal && p.day && !(await evaluate('!!document.querySelector("[data-act=cal-layout]")')));
+  await size(...UNFOLDED); await sleep(400);
+  check('다시 펴면: 고른 보기(그날 크게)로', !(await panes()).cal);
+  await click('.dp-head [data-act="cal-layout"][data-layout="split"]'); await sleep(200);
 
   /* ---------- 구글 연결 ---------- */
   console.log('[구글 연결]');
